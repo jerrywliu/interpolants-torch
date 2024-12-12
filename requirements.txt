@@ -1,0 +1,6 @@
+einops
+jupytext
+matplotlib
+numpy
+torch
+tqdm
