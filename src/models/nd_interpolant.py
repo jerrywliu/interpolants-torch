@@ -44,7 +44,7 @@ class SpectralInterpolationND(nn.Module):
                 
                 self.k[dim] = None
             else:
-                self.nodes_standard[dim] = torch.linspace(0, 2*torch.pi, self.Ns[dim]+1)[:-1]
+                self.nodes_standard[dim] = torch.linspace(0, 2*np.pi, self.Ns[dim]+1)[:-1]
                 # Compute FFT frequencies
                 self.k[dim] = torch.fft.fftfreq(self.Ns[dim]) * self.Ns[dim]
                 self.cheb_weights[dim] = None
@@ -55,8 +55,8 @@ class SpectralInterpolationND(nn.Module):
                 self._to_standard[dim] = lambda x, d=dim: 2 * (x - self.domains[d][0]) / self.domain_lengths[d] - 1
                 self._from_standard[dim] = lambda x, d=dim: self.domains[d][0] + (x + 1) * self.domain_lengths[d] / 2
             else:  # fourier
-                self._to_standard[dim] = lambda x, d=dim: 2*torch.pi * (x - self.domains[d][0]) / self.domain_lengths[d]
-                self._from_standard[dim] = lambda x, d=dim: self.domains[d][0] + self.domain_lengths[d] * x / (2*torch.pi)
+                self._to_standard[dim] = lambda x, d=dim: 2*np.pi * (x - self.domains[d][0]) / self.domain_lengths[d]
+                self._from_standard[dim] = lambda x, d=dim: self.domains[d][0] + self.domain_lengths[d] * x / (2*np.pi)
             
             # Map standard nodes to physical domain
             self.nodes[dim] = self._from_standard[dim](self.nodes_standard[dim])
@@ -71,7 +71,7 @@ class SpectralInterpolationND(nn.Module):
         # Learnable values at node points
         self.values = nn.Parameter(torch.zeros(self.Ns))
         
-    def _compute_cheb_derivative_matrix(self, nodes):
+    def _compute_cheb_derivative_matrix(self, nodes, domain_length):
         """
         Compute the differentiation matrix for 1D Chebyshev points
         """
@@ -93,11 +93,11 @@ class SpectralInterpolationND(nn.Module):
         D.diagonal().copy_(-torch.sum(D, dim=1))
 
         # Scale for domain transformation
-        D = D * (2.0/self.domain_length)
+        D = D * (2.0/domain_length)
 
         return D
 
-    def _compute_fourier_derivative_matrix(self, nodes):
+    def _compute_fourier_derivative_matrix(self, nodes, domain_length):
         """
         Compute the differentiation matrix for 1D equispaced Fourier
         """
@@ -118,7 +118,7 @@ class SpectralInterpolationND(nn.Module):
         D.diagonal().zero_()
 
         # Scale for domain transformation
-        D = D * (2*torch.pi/self.domain_length)
+        D = D * (2*np.pi/domain_length)
 
         return D
         
@@ -148,9 +148,9 @@ class SpectralInterpolationND(nn.Module):
                 if k[dim] not in self._diff_matrices[dim]:
                     if 1 not in self._diff_matrices[dim]:
                         if self.bases[dim] == "chebyshev":
-                            D = self._compute_cheb_derivative_matrix(self.nodes_standard[dim])
+                            D = self._compute_cheb_derivative_matrix(self.nodes_standard[dim], self.domain_lengths[dim])
                         else:  # fourier
-                            D = self._compute_fourier_derivative_matrix(self.nodes_standard[dim])
+                            D = self._compute_fourier_derivative_matrix(self.nodes_standard[dim], self.domain_lengths[dim])
                         self._diff_matrices[dim][1] = D
 
                     # Compose for higher derivatives
@@ -295,6 +295,7 @@ class SpectralInterpolationND(nn.Module):
             grid_start = len(batch_dims)
             perm.append(perm.pop(grid_start))
             result = result.permute(perm)
+            
             # If dim > 0, assume that the last batch dimension is the shared dimension, move it to second last
             if dim > 0:
                 perm = list(range(len(result.shape)))
@@ -342,6 +343,7 @@ class SpectralInterpolationND(nn.Module):
                 result = result.reshape(*batch_dims[:-1], *grid_dims_minus_current, x_eval_batch_shape_prod)
                 x_eval_dim = -1
                 target_pos = len(batch_dims) - 1
+                
             # Move x_eval batch dim after other batch dims
             perm = list(range(len(result.shape)))
             perm.insert(target_pos, perm.pop(x_eval_dim))
@@ -351,6 +353,58 @@ class SpectralInterpolationND(nn.Module):
     
     def forward(self, x_eval):
         return self.interpolate(x_eval, self.values)
+    
+    def _derivative_interpolant(self, k):
+        """
+        Compute mixed derivative of interpolant
+
+        Args:
+            k: Tuple of length n_dim specifying derivative order in each dimension
+               e.g., (2,0,1) means second derivative in x, none in y, first in z
+
+        Returns:
+            Tensor containing derivative values at grid points
+        """
+        # Handle the case where k is a single integer (apply to first dimension)
+        if isinstance(k, int):
+            k = (k,) + (0,)*(self.n_dim-1)
+
+        assert len(k) == self.n_dim, f"Expected {self.n_dim} derivative orders, got {len(k)}"
+
+        # If all derivatives are zero, return values
+        if all(ki == 0 for ki in k):
+            return self.values
+
+        # Get mixed derivative matrix
+        Dk = self.derivative_matrix(k)
+
+        # Compute derivative values at nodes (differentiable w.r.t self.values)
+        # Reshape values to a flat vector for matrix multiplication
+        values_flat = self.values.reshape(-1)
+        dk_nodes = Dk @ values_flat
+
+        # Reshape back to grid shape
+        dk_nodes = dk_nodes.reshape(*self.values.shape)
+
+        return dk_nodes
+
+    def derivative(self, x_eval, k):
+        """
+        Compute mixed derivative of interpolant at arbitrary evaluation points
+
+        Args:
+            x_eval: Tensor of shape (..., n_dim) containing coordinates to evaluate at
+            k: Tuple of length n_dim specifying derivative order in each dimension
+               e.g., (2,0,1) means second derivative in x, none in y, first in z
+
+        Returns:
+            Tensor of shape (...) containing derivative values at x_eval points
+        """
+        # Compute derivative values at grid points
+        dk_nodes = self._derivative_interpolant(k)
+
+        # Interpolate to evaluation points
+        return self.interpolate(x_eval, dk_nodes)
 
 # Test the ND interpolant
 if __name__ == "__main__":
