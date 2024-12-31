@@ -1555,7 +1555,7 @@ def plot_solution(model, eval_points, exact_solution, epoch):
 
 
 
-# %% jupyter={"outputs_hidden": true}
+# %%
 # Example usage:
 model = SpectralInterpolationND(
     Ns=[21, 22],
@@ -1584,14 +1584,14 @@ plt.show()
 # %%
 # Example usage:
 model = SpectralInterpolationND(
-    Ns=[41, 42],
+    Ns=[73, 72],
     bases=['chebyshev', 'fourier'],
     # Ns=[11, 11],
     # bases=['chebyshev', 'chebyshev'],
     domains=[(0, 1), (0, 2*np.pi)]
 )
 
-history = train_advection(model, n_epochs=100000, lr=1e-3, ic_weight=1, c=80, plot_every=100)
+history = train_advection(model, n_epochs=1000, lr=1e-3, ic_weight=1, c=80, plot_every=100)
 
 
 # %% [markdown]
