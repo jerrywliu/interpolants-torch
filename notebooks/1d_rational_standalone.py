@@ -450,116 +450,6 @@ if __name__ == "__main__":
     test_rational_interp()
 
 # %% [markdown]
-# ### Baseline: the steep function has near discontinuities around $\pm 0.5$. Let's manually fix some poles near those locations.
-# TODO what are the optimal choice of poles?
-
-# %%
-import torch
-import matplotlib.pyplot as plt
-
-def test_geometric_poles():
-    # Create models with more poles
-    n_points = 20
-    n_pole_pairs = 8  # 8 total poles
-    standard_model = LagrangeInterpolationModel(n_points)
-    rational_model = RationalInterpolationModel(n_points, num_poles=n_pole_pairs*2)
-    
-    # Manually set pole locations with geometric spacing
-    with torch.no_grad():
-        # Geometric spacing from transition points
-        k = torch.arange(1., n_pole_pairs//2+1)
-        n = float(n_pole_pairs)
-        
-        # Real parts at ±0.5 ± exp(-k/√n)
-        spacing = torch.exp(-k/torch.sqrt(torch.tensor(n)))
-        # real_parts = torch.cat([0.5 + spacing, -0.5 - spacing.flip(0)])
-        real_parts = torch.cat([0.5*torch.ones(n_pole_pairs//2), -0.5*torch.ones(n_pole_pairs//2)])
-        rational_model.pole_real.copy_(real_parts)
-        
-        # Imaginary parts also decrease geometrically
-        imag_parts = 0.1 * torch.exp(-k/torch.sqrt(torch.tensor(n)))
-        rational_model.pole_imag.copy_(torch.cat([imag_parts, imag_parts.flip(0)]))
-        
-        # Update weights
-        rational_model.update_weights()
-    
-    # Rest of visualization code...
-    
-    # Generate evaluation points
-    x_eval = torch.linspace(-1, 1, 1000)
-    y_true = steep_transition(x_eval)
-    
-    # Set node values
-    with torch.no_grad():
-        standard_model.values.copy_(steep_transition(standard_model.nodes))
-        rational_model.values.copy_(steep_transition(rational_model.nodes))
-    
-    # Plot comparison
-    plt.figure(figsize=(15, 5))
-    
-    # Function comparison
-    plt.subplot(131)
-    with torch.no_grad():
-        y_standard = standard_model(x_eval)
-        y_rational = rational_model(x_eval)
-    
-    plt.plot(x_eval, y_true, 'k-', label='True', alpha=0.5)
-    plt.plot(x_eval, y_standard, 'b--', label='Standard')
-    plt.plot(x_eval, y_rational, 'r:', label='Rational')
-    
-    # Plot nodes
-    nodes_standard = standard_model.nodes.detach()
-    nodes_rational = rational_model.nodes.detach()
-    values_standard = standard_model.values.detach()
-    values_rational = rational_model.values.detach()
-    
-    plt.plot(nodes_standard, values_standard, 'b.', alpha=0.5, markersize=8)
-    plt.plot(nodes_rational, values_rational, 'r.', alpha=0.5, markersize=8)
-    
-    plt.grid(True)
-    plt.legend()
-    plt.title('Function Comparison')
-    
-    # Complex plane with poles
-    plt.subplot(132)
-    poles = rational_model.get_poles()
-    pole_real, pole_imag = poles[:, 0], poles[:, 1]
-    
-    # Plot real axis
-    plt.axhline(y=0, color='k', linestyle='-', alpha=0.3)
-    plt.plot([-1, 1], [0, 0], 'k-', linewidth=2, label='[-1,1]')
-    
-    # Plot poles
-    plt.plot(pole_real, pole_imag, 'r+', markersize=10, label='Poles')
-    
-    plt.grid(True)
-    plt.axis('equal')
-    plt.xlabel('Re(z)')
-    plt.ylabel('Im(z)')
-    plt.title('Pole Locations')
-    plt.legend()
-    
-    # Error comparison
-    plt.subplot(133)
-    err_standard = torch.abs(y_standard - y_true)
-    err_rational = torch.abs(y_rational - y_true)
-    plt.semilogy(x_eval, err_standard, 'b-', label='Standard Error')
-    plt.semilogy(x_eval, err_rational, 'r-', label='Rational Error')
-    plt.grid(True)
-    plt.legend()
-    plt.title('Error Comparison')
-    
-    plt.tight_layout()
-    plt.show()
-    
-    # Print max errors
-    print(f"Standard max error: {err_standard.max():.2e}")
-    print(f"Rational max error: {err_rational.max():.2e}")
-
-if __name__ == "__main__":
-    test_geometric_poles()
-
-# %% [markdown]
 # ### Let's try learning the poles for the steep function.
 
 # %%
@@ -572,7 +462,7 @@ def steep_transition(x, alpha=50.0):
     """Logistic transition function"""
     return -1.0 + 2.0 / (1.0 + torch.exp(-alpha * (0.5 - torch.abs(x))))
 
-def train_interpolation(standard_model, rational_model, num_epochs=1000, batch_size=128):
+def train_interpolation(standard_model, rational_model, num_epochs=1000, batch_size=128, freeze_poles=500):
     """Train both models on the steep transition function"""
     # Generate training data with more points near transition
     x_uniform = torch.linspace(-1, 1, 1000)
@@ -592,9 +482,13 @@ def train_interpolation(standard_model, rational_model, num_epochs=1000, batch_s
     standard_losses = []
     rational_losses = []
     
-    for epoch in range(num_epochs):
+    for epoch in tqdm(range(num_epochs)):
         standard_epoch_loss = 0.0
         rational_epoch_loss = 0.0
+        
+        if epoch == freeze_poles:
+            rational_model.pole_real.requires_grad = False
+            rational_model.pole_imag.requires_grad = False
         
         for x_batch, y_batch in loader:
             # Train standard model
@@ -691,12 +585,12 @@ def plot_training_results(x_eval, standard_model, rational_model, losses):
 
 def test_training():
     # Create models
-    n_points = 20
+    n_points = 60
     standard_model = LagrangeInterpolationModel(n_points)
     rational_model = RationalInterpolationModel(n_points, num_poles=4)
     
     # Train models
-    losses = train_interpolation(standard_model, rational_model, num_epochs=1000)
+    losses = train_interpolation(standard_model, rational_model, num_epochs=2000, freeze_poles=1000)
     
     # Evaluate and plot results
     x_eval = torch.linspace(-1, 1, 1000)

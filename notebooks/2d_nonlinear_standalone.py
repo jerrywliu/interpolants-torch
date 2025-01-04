@@ -439,282 +439,18 @@ class SpectralInterpolationND(nn.Module):
 # # PINN training
 
 # %% [markdown]
-# We look at the 1D advection equation (1 space + 1 time variable, both of which we treat spectrally):
-# $$\frac{\partial u}{\partial t} + c \frac{\partial u}{\partial x} = 0, \quad t \in [0,1], \quad x \in [0,2\pi]$$
-# $$u(0,x) = \sin(x)$$
+# We look at the Allen-Cahn equation (1 space + 1 time variable, both of which we treat spectrally):
 #
-# Solution:
-# $$u(t,x) = \sin(x - ct)$$
+# \begin{align*}
+# &u_t - 0.0001u_{xx} + 5u^3 - 5u = 0, \quad t \in [0,1], x \in [-1,1], \\
+# &u(0,x) = x^2\cos(\pi x), \\
+# &u(t,-1) = u(t,1), \\
+# &u_x(t,-1) = u_x(t,1)
+# \end{align*}
 #
-# Below, we use $c = 8$ for simplicity. Note that the test case in Wang et al. (2023) uses $c = 80$.
+# Solution is computed with Exponential Time Differencing.
 #
-# Note that we use periodic boundary conditions in x since displacement of a sine wave should be periodic.
-
-# %%
-def compute_derivative(model, x, eval_mode=False):
-    """
-    Compute solution and its derivatives at points x
-    
-    Args:
-        model: SpectralInterpolationND or neural network model
-        x: points of shape (..., 2) where last dimension is (t,x)
-        eval_mode: if True, detach gradients for evaluation
-    
-    Returns:
-        u: solution at x points
-        u_t: time derivative
-        u_x: space derivative
-    """
-    if isinstance(model, SpectralInterpolationND):
-        u = model(x)
-        # Get time derivative (k=(1,0) means first derivative in t, zero in x)
-        u_t = model.derivative(x, k=(1,0))  
-        # Get space derivative (k=(0,1) means zero derivative in t, first in x)
-        u_x = model.derivative(x, k=(0,1))
-        
-        if eval_mode:
-            u = u.detach()
-            u_t = u_t.detach()
-            u_x = u_x.detach()
-            
-    else:
-        # For MLP, compute gradients manually
-        x_clone = x.clone().requires_grad_(True)
-        u = model(x_clone)
-        
-        # Compute gradients with respect to t and x
-        grads = torch.autograd.grad(u.sum(), x_clone, 
-                                  create_graph=not eval_mode)[0]
-        u_t = grads[..., 0]  # gradient with respect to t
-        u_x = grads[..., 1]  # gradient with respect to x
-        
-        if eval_mode:
-            u = u.detach()
-            u_t = u_t.detach()
-            u_x = u_x.detach()
-            
-    return u, u_t, u_x
-
-
-def compute_pde_loss(model, colloc_points, ic_points=None, ic_weight=1.0, c=80):
-    """
-    Compute loss for advection equation u_t + c*u_x = 0
-    
-    Args:
-        model: SpectralInterpolationND or neural network model
-        colloc_points: points of shape (n_points, 2) for PDE residual
-        ic_points: points of shape (n_ic_points, 2) for initial condition.
-                  If None, assumes these are included in colloc_points
-        c: advection speed
-        
-    Returns:
-        total_loss: combined PDE and IC loss
-        pde_residual: residual at collocation points
-        ic_residual: residual at initial condition points
-    """
-    # Compute solution and derivatives at collocation points
-    u, u_t, u_x = compute_derivative(model, colloc_points)
-    
-    # PDE residual: u_t + c*u_x = 0
-    pde_residual = u_t + c*u_x
-    pde_loss = torch.mean(pde_residual**2)
-    
-    # Initial condition: u(0,x) = sin(x)
-    if ic_points is None:
-        # Extract points where t=0
-        mask = torch.abs(colloc_points[..., 0]) < 1e-10
-        ic_points = colloc_points[mask]
-    
-    u_ic = model(ic_points)
-    x_ic = ic_points[..., 1]  # get x coordinates
-    ic_residual = u_ic - torch.sin(x_ic)
-    ic_loss = ic_weight * torch.mean(ic_residual**2)
-    
-    total_loss = pde_loss + ic_loss
-    
-    return total_loss, pde_residual, ic_residual
-
-
-# Simple iterative approach
-def running_min(lst):
-    result = []
-    current_min = float('inf')
-    for x in lst:
-        current_min = min(current_min, x)
-        result.append(current_min)
-    return result
-
-def compute_relative_l2_error(pred, true):
-    """
-    Compute relative L2 error between predicted and true values.
-    
-    Args:
-        pred: predicted values (torch.Tensor)
-        true: true values (torch.Tensor)
-        
-    Returns:
-        float: relative L2 error
-    """
-    return (torch.sqrt(torch.mean((pred - true)**2)) / 
-            torch.sqrt(torch.mean(true**2))).item()
-
-
-def train_advection(model, n_epochs=1000, lr=1e-3, ic_weight=1.0, c=80, plot_every=100):
-    """
-    Train model to solve the advection equation
-    u_t + c*u_x = 0, u(0,x) = sin(x)
-    
-    Args:
-        model: SpectralInterpolationND model
-        n_epochs: number of training epochs
-        lr: learning rate
-        c: advection speed
-    """
-    # Use model's built-in grid for collocation points
-    t_points = model.nodes[0]  # Chebyshev in time
-    x_points = model.nodes[1]  # Fourier in space
-    T, X = torch.meshgrid(t_points, x_points, indexing='ij')
-    colloc_points = torch.stack([T.flatten(), X.flatten()], dim=1)
-    
-    # Exact solution for comparisons
-    def exact_solution(t, x):
-        return torch.sin(x - c*t)
-    
-    # Create evaluation grid (finer than training grid)
-    n_eval = 100
-    t_eval = torch.linspace(0, 1, n_eval)
-    x_eval = torch.linspace(0, 2*np.pi, n_eval)
-    T_eval, X_eval = torch.meshgrid(t_eval, x_eval, indexing='ij')
-    eval_points = torch.stack([T_eval.flatten(), X_eval.flatten()], dim=1)
-    
-    # Optimizer
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-    
-    # Training history
-    history = {
-        'loss': [], 
-        'pde_residual': [], 
-        'ic_residual': [],
-        'l2_error': []
-    }
-    
-    # Training loop
-    for epoch in tqdm(range(n_epochs)):
-        optimizer.zero_grad()
-        
-        # Compute loss
-        loss, pde_residual, ic_residual = compute_pde_loss(
-            model, colloc_points, ic_weight=ic_weight, c=c
-        )
-        
-        # Backward and optimize
-        loss.backward()
-        optimizer.step()
-        
-        # Compute L2 error against exact solution
-        with torch.no_grad():
-            u_pred = model(eval_points)
-            u_exact = exact_solution(eval_points[:, 0], eval_points[:, 1])
-            l2_error = torch.mean((u_pred - u_exact)**2).sqrt()
-        
-        # Record history
-        history['loss'].append(loss.item())
-        history['pde_residual'].append(torch.mean(pde_residual**2).item())
-        history['ic_residual'].append(torch.mean(ic_residual**2).item())
-        history['l2_error'].append(l2_error.item())
-        
-        # Print progress
-        if (epoch + 1) % plot_every == 0:
-            print(f"Epoch {epoch+1}/{n_epochs}")
-            print(f"Total Loss: {loss.item():.2e}")
-            print(f"PDE Residual: {torch.mean(pde_residual**2).item():.2e}")
-            print(f"IC Residual: {torch.mean(ic_residual**2).item():.2e}")
-            print(f"L2 Error: {l2_error.item():.2e}")
-            
-            # Visualize current solution
-            plot_solution(model, eval_points, exact_solution, epoch+1)
-    
-    return history
-
-def plot_solution(model, eval_points, exact_solution, epoch):
-    """Plot current solution vs exact solution"""
-    with torch.no_grad():
-        u_pred = model(eval_points)
-        u_exact = exact_solution(eval_points[:, 0], eval_points[:, 1])
-        
-        n_eval = int(torch.sqrt(torch.tensor(len(eval_points))))
-        u_pred = u_pred.reshape(n_eval, n_eval)
-        u_exact = u_exact.reshape(n_eval, n_eval)
-        error = torch.abs(u_pred - u_exact)
-        
-        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5))
-        
-        # Predicted solution
-        im1 = ax1.imshow(u_pred.T, origin='lower', extent=[0, 1, 0, 2*np.pi],
-                        aspect='auto', cmap='viridis')
-        plt.colorbar(im1, ax=ax1)
-        ax1.set_title(f'Predicted (epoch {epoch})')
-        ax1.set_xlabel('t')
-        ax1.set_ylabel('x')
-        
-        # Exact solution
-        im2 = ax2.imshow(u_exact.T, origin='lower', extent=[0, 1, 0, 2*np.pi],
-                        aspect='auto', cmap='viridis')
-        plt.colorbar(im2, ax=ax2)
-        ax2.set_title('Exact')
-        ax2.set_xlabel('t')
-        ax2.set_ylabel('x')
-        
-        # Error
-        im3 = ax3.imshow(error.T, origin='lower', extent=[0, 1, 0, 2*np.pi],
-                        aspect='auto', cmap='magma')
-        plt.colorbar(im3, ax=ax3)
-        ax3.set_title('Error')
-        ax3.set_xlabel('t')
-        ax3.set_ylabel('x')
-        
-        plt.tight_layout()
-        plt.show()
-
-
-
-# %%
-# Example usage:
-model = SpectralInterpolationND(
-    Ns=[21, 22],
-    bases=['chebyshev', 'fourier'],
-    # Ns=[11, 11],
-    # bases=['chebyshev', 'chebyshev'],
-    domains=[(0, 1), (0, 2*np.pi)]
-)
-
-history = train_advection(model, n_epochs=100000, lr=1e-3, ic_weight=10, c=8, plot_every=1000)
-
-# %%
-# Plot training history
-plt.figure(figsize=(10, 5))
-plt.semilogy(running_min(history['loss']), label='Total Loss')
-plt.semilogy(running_min(history['ic_residual']), label='IC Residual')
-plt.semilogy(running_min(history['pde_residual']), label='PDE Residual')
-plt.semilogy(running_min(history['l2_error']), label='L2 Error')
-plt.grid(True)
-plt.legend()
-plt.title('Training History')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.show()
-
-# %%
-# Example usage:
-model = SpectralInterpolationND(
-    Ns=[73, 72],
-    bases=['chebyshev', 'fourier'],
-    # Ns=[11, 11],
-    # bases=['chebyshev', 'chebyshev'],
-    domains=[(0, 1), (0, 2*np.pi)]
-)
-
-history = train_advection(model, n_epochs=1000, lr=1e-3, ic_weight=1, c=80, plot_every=100)
+# We use trigonometric polynomials in x to enforce the boundary conditions.
 
 # %% [markdown]
 # ## Least squares
@@ -738,16 +474,110 @@ def get_allen_cahn_soln():
     return u_ref, t_star, x_star
 
 
-# %%
-# Create interpolant
-interp = SpectralInterpolationND(
-    Ns=[5, 4],
-    bases=['chebyshev', 'fourier'],  # Chebyshev in t, Fourier in x
-    domains=[(0, 1), (-1, 1)]        # t ∈ [0,1], x ∈ [-1,1]
-)
+# %% [markdown]
+# ### Sanity check: what's the resolution we need to resolve the GT solution?
 
 # %%
-interp.values.shape
+from scipy.interpolate import RegularGridInterpolator
+
+def interpolate_allen_cahn(Nx=800, Nt=21):
+    
+    # Create interpolant
+    interp = SpectralInterpolationND(
+        Ns=[Nt, Nx],
+        bases=['chebyshev', 'fourier'],
+        domains=[(0, 1), (-1, 1)]
+    )
+
+    # Get ground truth solution
+    u_ref, t_star, x_star = get_allen_cahn_soln()
+    TT, XX = np.meshgrid(t_star, x_star, indexing="ij")
+
+    # Sample reference solution at our grid points
+    # Create meshgrid for our collocation points
+    T_col, X_col = torch.meshgrid(interp.nodes[0], interp.nodes[1], indexing='ij')
+    points_col = torch.stack([T_col.flatten(), X_col.flatten()], dim=1)
+
+    # Interpolate reference solution to our collocation points
+    u_col = torch.from_numpy(u_ref)
+    grid_interpolator = RegularGridInterpolator((t_star, x_star), u_ref, method="cubic")
+    u_col_points = grid_interpolator(points_col.numpy())
+    u_col = torch.from_numpy(u_col_points).reshape(Nt, Nx)
+
+    # Set these values in our interpolant
+    interp.values.data = u_col
+
+    # Create coordinates for interpolation back to reference grid
+    points_ref = torch.stack([
+        torch.from_numpy(TT).flatten(),
+        torch.from_numpy(XX).flatten()
+    ], dim=1)
+
+    # Interpolate to reference grid
+    u_pred = interp.interpolate(points_ref, interp.values)
+    u_pred = u_pred.reshape(len(t_star), len(x_star)).detach().numpy()
+
+    # Plot
+    fig = plt.figure(figsize=(18, 5))
+    plt.subplot(1, 3, 1)
+    plt.pcolor(TT, XX, u_ref, cmap="jet", vmin=-1, vmax=1)
+    plt.colorbar()
+    plt.xlabel("t")
+    plt.ylabel("x")
+    plt.title("Exact")
+    plt.tight_layout()
+
+    plt.subplot(1, 3, 2)
+    plt.pcolor(TT, XX, u_pred, cmap="jet", vmin=-1, vmax=1)
+    plt.colorbar()
+    plt.xlabel("t")
+    plt.ylabel("x")
+    plt.title("Interpolated from exact")
+    plt.tight_layout()
+
+    plt.subplot(1, 3, 3)
+    plt.pcolor(TT, XX, np.abs((u_ref - u_pred)), cmap="jet")
+    plt.colorbar()
+    plt.xlabel("t")
+    plt.ylabel("x")
+    plt.title("Interpolation error (absolute)")
+    plt.tight_layout()
+
+    # Save the figure
+    fig_path = os.path.join(save_dir, f"ac_interp_nx={nx}_nt={nt}.pdf")
+    fig.savefig(fig_path, bbox_inches="tight", dpi=300)
+    plt.show()
+
+    mean_abs_error = np.abs(u_ref - u_pred).mean()
+    print(f"Mean absolute error: {mean_abs_error}")
+    return mean_abs_error
+
+# Run sweep
+nt = 21
+nxs = [100*2**k for k in range(5)]
+mean_abs_errors = []
+for nx in nxs:
+    print(f"Nx = {nx}")
+    mean_abs_errors.append(interpolate_allen_cahn(Nx=nx, Nt=nt))
+    
+plt.plot(nxs, mean_abs_errors)
+plt.xlabel("nx")
+plt.xscale("log")
+plt.ylabel("Mean absolute error")
+plt.yscale("log")
+plt.title("Interpolating Allen-Cahn solution, nt=21")
+fig_path = os.path.join(save_dir, "ac_interp_sweep.pdf")
+plt.savefig(fig_path, dpi=300)
+
+# %%
+plt.plot(nxs, mean_abs_errors, "-bo")
+plt.xlabel("nx")
+plt.xscale("log")
+plt.ylabel("Mean absolute error")
+plt.yscale("log")
+plt.title("Interpolating Allen-Cahn solution, nt=21")
+fig_path = os.path.join(save_dir, "ac_interp_sweep.pdf")
+plt.savefig(fig_path, dpi=300)
 
 
 # %%
@@ -956,78 +786,6 @@ for i in range(max_iter):
         break
         
     u = u_next
-
-# %% [markdown]
-# ### Sanity check: what's the resolution we need to resolve the GT solution?
-
-# %%
-from scipy.interpolate import RegularGridInterpolator
-
-# Create interpolant
-Nx, Nt = 1600, 21
-interp = SpectralInterpolationND(
-    Ns=[Nt, Nx],
-    bases=['chebyshev', 'fourier'],
-    domains=[(0, 1), (-1, 1)]
-)
-
-# Get ground truth solution
-u_ref, t_star, x_star = get_allen_cahn_soln()
-TT, XX = np.meshgrid(t_star, x_star, indexing="ij")
-
-# Sample reference solution at our grid points
-# Create meshgrid for our collocation points
-T_col, X_col = torch.meshgrid(interp.nodes[0], interp.nodes[1], indexing='ij')
-points_col = torch.stack([T_col.flatten(), X_col.flatten()], dim=1)
-
-# Interpolate reference solution to our collocation points
-u_col = torch.from_numpy(u_ref)
-grid_interpolator = RegularGridInterpolator((t_star, x_star), u_ref, method="cubic")
-u_col_points = grid_interpolator(points_col.numpy())
-u_col = torch.from_numpy(u_col_points).reshape(Nt, Nx)
-
-# Set these values in our interpolant
-interp.values.data = u_col
-
-# Create coordinates for interpolation back to reference grid
-points_ref = torch.stack([
-    torch.from_numpy(TT).flatten(),
-    torch.from_numpy(XX).flatten()
-], dim=1)
-
-# Interpolate to reference grid
-u_pred = interp.interpolate(points_ref, interp.values)
-u_pred = u_pred.reshape(len(t_star), len(x_star)).detach().numpy()
-
-# Plot
-fig = plt.figure(figsize=(18, 5))
-plt.subplot(1, 3, 1)
-plt.pcolor(TT, XX, u_ref, cmap="jet", vmin=-1, vmax=1)
-plt.colorbar()
-plt.xlabel("t")
-plt.ylabel("x")
-plt.title("Exact")
-plt.tight_layout()
-
-plt.subplot(1, 3, 2)
-plt.pcolor(TT, XX, u_pred, cmap="jet", vmin=-1, vmax=1)
-plt.colorbar()
-plt.xlabel("t")
-plt.ylabel("x")
-plt.title("Interpolated from exact")
-plt.tight_layout()
-
-plt.subplot(1, 3, 3)
-plt.pcolor(TT, XX, np.abs((u_ref - u_pred)), cmap="jet")
-plt.colorbar()
-plt.xlabel("t")
-plt.ylabel("x")
-plt.title("Interpolation error (absolute)")
-plt.tight_layout()
-
-# Save the figure
-fig_path = os.path.join(save_dir, "ac.pdf")
-fig.savefig(fig_path, bbox_inches="tight", dpi=300)
 
 # %% [markdown]
 # ### Sanity check: are we enforcing the initial condition correctly?
