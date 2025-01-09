@@ -474,13 +474,67 @@ def get_allen_cahn_soln():
     return u_ref, t_star, x_star
 
 
+# %%
+import scipy.io
+import numpy as np
+import matplotlib.pyplot as plt
+
+def get_allen_cahn_soln():
+    data = scipy.io.loadmat("allen_cahn.mat")
+    u_ref = data["usol"]
+    t_star = data["t"].flatten()
+    x_star = data["x"].flatten()
+    return u_ref, t_star, x_star
+
+def plot_allen_cahn_solution():
+    # Load the solution
+    u_ref, t_star, x_star = get_allen_cahn_soln()
+    
+    # Create meshgrid for plotting
+    T, X = np.meshgrid(t_star, x_star, indexing="ij")
+    
+    # Create figure with two subplots
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+    
+    # 2D color plot
+    c1 = ax1.pcolormesh(T, X, u_ref, cmap='jet', vmin=-1, vmax=1)
+    ax1.set_xlabel('Time (t)')
+    ax1.set_ylabel('Space (x)')
+    ax1.set_title('Allen-Cahn Solution')
+    fig.colorbar(c1, ax=ax1)
+    
+    # Plot solution at different time points
+    times = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    for t in times:
+        t_idx = np.abs(t_star - t).argmin()
+        ax2.plot(x_star, u_ref[t_idx, :], label=f't = {t:.1f}')
+    
+    ax2.set_xlabel('Space (x)')
+    ax2.set_ylabel('u(x,t)')
+    ax2.set_title('Solution Profiles at Different Times')
+    ax2.legend()
+    ax2.grid(True)
+    
+    plt.tight_layout()
+    
+    # Print solution information
+    print(f"Solution shape: {u_ref.shape}")
+    print(f"Time points: {len(t_star)} (from {t_star.min():.2f} to {t_star.max():.2f})")
+    print(f"Spatial points: {len(x_star)} (from {x_star.min():.2f} to {x_star.max():.2f})")
+    
+    return fig
+
+# Create and display the plot
+fig = plot_allen_cahn_solution()
+plt.show()
+
 # %% [markdown]
 # ### Sanity check: what's the resolution we need to resolve the GT solution?
 
 # %%
 from scipy.interpolate import RegularGridInterpolator
 
-def interpolate_allen_cahn(Nx=800, Nt=21):
+def interpolate_allen_cahn(Nt=21, Nx=800):
     
     # Create interpolant
     interp = SpectralInterpolationND(
@@ -560,16 +614,6 @@ for nx in nxs:
     print(f"Nx = {nx}")
     mean_abs_errors.append(interpolate_allen_cahn(Nx=nx, Nt=nt))
     
-plt.plot(nxs, mean_abs_errors)
-plt.xlabel("nx")
-plt.xscale("log")
-plt.ylabel("Mean absolute error")
-plt.yscale("log")
-plt.title("Interpolating Allen-Cahn solution, nt=21")
-fig_path = os.path.join(save_dir, "ac_interp_sweep.pdf")
-plt.savefig(fig_path, dpi=300)
-
-# %%
 plt.plot(nxs, mean_abs_errors, "-bo")
 plt.xlabel("nx")
 plt.xscale("log")
@@ -1047,6 +1091,17 @@ def visualize_solution(u_pred, u_exact, epoch, T_eval=None, X_eval=None):
     plt.tight_layout()
     plt.show()
 
+data_dir = "/pscratch/sd/j/jwl50/interpolants-torch/notebooks/data"
+save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/notebooks/figures"
+
+def get_allen_cahn_soln():
+    data = scipy.io.loadmat(os.path.join(data_dir, "allen_cahn_d=1e-1.mat"))
+    u_ref = data["usol"]
+    t_star = data["t"].flatten()
+    x_star = data["x"].flatten()
+
+    return u_ref, t_star, x_star
+
 def train_allen_cahn(model, n_epochs=1000, lr=1e-3, ic_weight=1.0, epsilon=0.01, plot_every=100):
     """Train model to solve the Allen-Cahn equation"""
     # Use model's built-in grid for collocation points
@@ -1122,7 +1177,7 @@ def train_allen_cahn(model, n_epochs=1000, lr=1e-3, ic_weight=1.0, epsilon=0.01,
     return history
 
 
-# %%
+# %% jupyter={"outputs_hidden": true}
 # Create spectral interpolant
 Nx = 20
 Nt = 21
@@ -1147,6 +1202,244 @@ history = train_allen_cahn(
     ic_weight=ic_weight,
     epsilon=epsilon,
     plot_every=plot_every
+)
+
+# Plot training history
+plt.figure(figsize=(15, 5))
+plt.subplot(131)
+plt.semilogy(history['loss'], label='Total Loss')
+plt.semilogy(history['pde_residual'], label='PDE Residual')
+plt.semilogy(history['ic_residual'], label='IC Residual')
+plt.legend()
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.title('Training History')
+
+plt.subplot(132)
+plt.semilogy(history['l2_error'])
+plt.xlabel('Epoch')
+plt.ylabel('L2 Error')
+plt.title('L2 Error vs Reference')
+
+plt.tight_layout()
+plt.show()
+
+
+# %% [markdown]
+# # Let's make the problem a lot simpler. Set the T range to [0, 0.1] only.
+
+# %%
+def compute_derivative_ac(model, x, eval_mode=False):
+    """Compute solution and derivatives for Allen-Cahn"""
+    if isinstance(model, SpectralInterpolationND):
+        u = model(x)
+        u_t = model.derivative(x, k=(1,0))  # First time derivative
+        u_xx = model.derivative(x, k=(0,2))  # Second space derivative
+        
+        if eval_mode:
+            u = u.detach()
+            u_t = u_t.detach()
+            u_xx = u_xx.detach()
+            
+    else:
+        raise NotImplementedError("Only implemented for SpectralInterpolationND")
+            
+    return u, u_t, u_xx
+
+def compute_pde_loss_ac(model, colloc_points, ic_points=None, ic_weight=1.0, epsilon=0.01):
+    """
+    Compute loss for Allen-Cahn equation
+    u_t - εu_xx + 5u³ - 5u = 0
+    u(0,x) = x²cos(πx)
+    """
+    # Compute solution and derivatives at collocation points
+    u, u_t, u_xx = compute_derivative_ac(model, colloc_points)
+    
+    # PDE residual: u_t - εu_xx + 5u³ - 5u = 0
+    pde_residual = u_t - epsilon*u_xx + 5*u**3 - 5*u
+    pde_loss = torch.mean(pde_residual**2)
+    
+    # Initial condition
+    if ic_points is None:
+        # Extract points where t=0
+        mask = torch.abs(colloc_points[..., 0]) < 1e-10
+        ic_points = colloc_points[mask]
+    
+    u_ic = model(ic_points)
+    x_ic = ic_points[..., 1]  # get x coordinates
+    ic_residual = u_ic - x_ic**2 * torch.cos(np.pi*x_ic)
+    ic_loss = ic_weight * torch.mean(ic_residual**2)
+    
+    total_loss = pde_loss + ic_loss
+    
+    return total_loss, pde_residual, ic_residual
+
+def visualize_solution(u_pred, u_exact, epoch, T_eval=None, X_eval=None):
+    """Plot predicted vs exact solution and error"""
+    if T_eval is None or X_eval is None:
+        n_eval = int(np.sqrt(len(u_pred.flatten())))
+        T_eval, X_eval = torch.meshgrid(
+            torch.linspace(0, 1, n_eval),
+            torch.linspace(-1, 1, n_eval),
+            indexing='ij'
+        )
+    
+    # Convert to numpy for plotting
+    u_pred = u_pred.detach().numpy()
+    u_exact = u_exact.detach().numpy()
+    T_eval = T_eval.detach().numpy()
+    X_eval = X_eval.detach().numpy()
+    error = np.abs(u_pred - u_exact)
+    
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5))
+    
+    # Predicted solution
+    im1 = ax1.pcolor(T_eval, X_eval, u_pred, cmap='jet', vmin=-1, vmax=1)
+    plt.colorbar(im1, ax=ax1)
+    ax1.set_title(f'Predicted (epoch {epoch})')
+    ax1.set_xlabel('t')
+    ax1.set_ylabel('x')
+    
+    # Exact solution
+    im2 = ax2.pcolor(T_eval, X_eval, u_exact, cmap='jet', vmin=-1, vmax=1)
+    plt.colorbar(im2, ax=ax2)
+    ax2.set_title('Exact')
+    ax2.set_xlabel('t')
+    ax2.set_ylabel('x')
+    
+    # Error
+    im3 = ax3.pcolor(T_eval, X_eval, error, cmap='jet')
+    plt.colorbar(im3, ax=ax3)
+    ax3.set_title('Error')
+    ax3.set_xlabel('t')
+    ax3.set_ylabel('x')
+    
+    plt.tight_layout()
+    plt.show()
+
+data_dir = "/pscratch/sd/j/jwl50/interpolants-torch/notebooks/data"
+save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/notebooks/figures"
+
+def get_allen_cahn_soln():
+    data = scipy.io.loadmat(os.path.join(data_dir, "allen_cahn_d=1e-2.mat"))
+    u_ref = data["usol"]
+    t_star = data["t"].flatten()
+    x_star = data["x"].flatten()
+
+    return u_ref, t_star, x_star
+
+# Update the training function to take T_START and T_END
+def train_allen_cahn(model, n_epochs=1000, lr=1e-3, ic_weight=1.0, epsilon=0.01, plot_every=100, t_start=0.0, t_end=0.1):
+    """Train model to solve the Allen-Cahn equation"""
+    # Use model's built-in grid for collocation points
+    t_points = model.nodes[0]  # Chebyshev in time
+    x_points = model.nodes[1]  # Fourier in space
+
+    # Restrict time points to the specified range
+    t_points = t_points[(t_points >= t_start) & (t_points <= t_end)]
+
+    T, X = torch.meshgrid(t_points, x_points, indexing='ij')
+    colloc_points = torch.stack([T.flatten(), X.flatten()], dim=1)
+    
+    # Get reference solution for comparison
+    u_ref, t_star, x_star = get_allen_cahn_soln()
+    
+    # Create evaluation grid within the specified time range
+    n_eval = 100
+    t_eval = torch.linspace(t_start, t_end, n_eval)
+    x_eval = torch.linspace(-1, 1, n_eval)
+    T_eval, X_eval = torch.meshgrid(t_eval, x_eval, indexing='ij')
+    eval_points = torch.stack([T_eval.flatten(), X_eval.flatten()], dim=1)
+    
+    # Optimizer
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    
+    # Training history
+    history = {
+        'loss': [], 
+        'pde_residual': [], 
+        'ic_residual': [],
+        'l2_error': []
+    }
+    
+    # Training loop
+    for epoch in tqdm(range(n_epochs)):
+        optimizer.zero_grad()
+        
+        # Compute loss
+        loss, pde_residual, ic_residual = compute_pde_loss_ac(
+            model, colloc_points, ic_weight=ic_weight, epsilon=epsilon
+        )
+        
+        # Backward and optimize
+        loss.backward()
+        optimizer.step()
+        
+        # Compute L2 error against reference solution
+        with torch.no_grad():
+            u_pred = model(eval_points).reshape(n_eval, n_eval)
+            # Interpolate reference solution to evaluation points
+            u_ref_interp = RegularGridInterpolator(
+                (t_star, x_star), 
+                u_ref
+            )
+            u_exact = torch.from_numpy(
+                u_ref_interp(torch.stack([T_eval, X_eval], dim=-1).numpy())
+            )
+            l2_error = torch.mean((u_pred - u_exact)**2).sqrt()
+        
+        # Record history
+        history['loss'].append(loss.item())
+        history['pde_residual'].append(torch.mean(pde_residual**2).item())
+        history['ic_residual'].append(torch.mean(ic_residual**2).item())
+        history['l2_error'].append(l2_error.item())
+        
+        # Print progress and plot
+        if (epoch + 1) % plot_every == 0:
+            print(f"Epoch {epoch+1}/{n_epochs}")
+            print(f"Total Loss: {loss.item():.2e}")
+            print(f"PDE Residual: {torch.mean(pde_residual**2).item():.2e}")
+            print(f"IC Residual: {torch.mean(ic_residual**2).item():.2e}")
+            print(f"L2 Error: {l2_error.item():.2e}")
+
+            # Visualize current solution
+            visualize_solution(u_pred, u_exact, epoch+1, T_eval, X_eval)
+    
+    return history
+
+
+
+# %%
+# Update the T range constant for the desired range
+T_START = 0.0
+T_END = 1.0
+
+# Create spectral interpolant
+Nx = 20
+Nt = 21
+interp = SpectralInterpolationND(
+    Ns=[Nt, Nx],
+    bases=['chebyshev', 'fourier'],  # Chebyshev in t, Fourier in x
+    domains=[(T_START, T_END), (-1, 1)]        # t ∈ [0,1], x ∈ [-1,1]
+)
+
+# Training parameters
+n_epochs = 100000
+lr = 1e-3
+ic_weight = 10.0  # Higher weight on initial condition
+epsilon = 1e-2     # Start with larger diffusion coefficient
+plot_every = 1000  # Plot every 1000 epochs
+
+# Train the model using the adjusted function
+history = train_allen_cahn(
+    model=interp,
+    n_epochs=n_epochs,
+    lr=lr,
+    ic_weight=ic_weight,
+    epsilon=epsilon,
+    plot_every=plot_every,
+    t_start=T_START,  # Starting time for training
+    t_end=T_END       # Ending time for training
 )
 
 # Plot training history
