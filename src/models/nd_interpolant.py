@@ -220,18 +220,32 @@ class SpectralInterpolationND(nn.Module):
         # values: (1, B2, B, N)
         # nodes: (1, 1, 1, N)
         # weights: (1, 1, 1, N)
-        x_eval_expanded = x_eval_standard.unsqueeze(1).unsqueeze(-1)  # (B1, 1, B, 1)
-        values_expanded = values.unsqueeze(0)  # (1, B2, B, N)
-        nodes_expanded = nodes_std.reshape(1, 1, 1, -1)
-        weights_expanded = weights.reshape(1, 1, 1, -1)
+        # x_eval_expanded = x_eval_standard[:, None, :, None]  # (B1, 1, B, 1)
+        # values_expanded = values[None, ...]  # (1, B2, B, N)
+        # nodes_expanded = nodes_std[None, None, None, :]  # (1, 1, 1, N)
+        # weights_expanded = weights[None, None, None, :]  # (1, 1, 1, N)
 
-        # Compute distances - result is (B1, B2, B, N)
-        d_x = x_eval_expanded - nodes_expanded
+        x_eval_expanded, nodes_expanded, values_expanded, weights_expanded = (
+            torch.broadcast_tensors(
+                x_eval_standard[:, None, :, None],
+                nodes_std[None, None, None, :],
+                values[None, ...],
+                weights[None, None, None, :],
+            )
+        )
+
+        # Compute distances
+        d_x = x_eval_expanded - nodes_expanded  # (B1, B2, B, N)
 
         small_diff = torch.abs(d_x) < eps
         small_diff_max = torch.max(small_diff, dim=-1, keepdim=True).values
 
-        d_x = torch.where(small_diff_max, torch.zeros_like(d_x), 1.0 / d_x)
+        # d_x = torch.where(small_diff_max, torch.zeros_like(d_x), 1.0 / d_x)
+
+        d_x_reciprocal = torch.zeros_like(d_x)
+        d_x_reciprocal[~small_diff] = 1.0 / d_x[~small_diff]
+        d_x = torch.where(small_diff_max, torch.zeros_like(d_x), d_x_reciprocal)
+
         d_x[small_diff] = 1
 
         # Compute weighted sum along last axis
@@ -240,7 +254,7 @@ class SpectralInterpolationND(nn.Module):
         )  # (B1, B2, B)
         f_eval_denom = torch.sum(d_x * weights_expanded, dim=-1)  # (B1, B2, B)
 
-        return f_eval_num / f_eval_denom
+        return f_eval_num / f_eval_denom  # (B1, B2, B)
 
     def _fourier_interpolate_1d(self, x_eval, values, to_std, k):
         """Helper for 1D Fourier interpolation along last axis
