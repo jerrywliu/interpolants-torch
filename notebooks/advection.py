@@ -15,18 +15,22 @@
 # %%
 import torch
 import torch.nn as nn
+import torch.optim as optim
 torch.set_default_dtype(torch.float64)
+import numpy as np
 
 from time import time
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+
 
 # %% [markdown]
-# ## ND interpolant
+# # Models
+
+# %% [markdown]
+# ## ND polynomial interpolant
 
 # %%
-import torch
-import torch.nn as nn
-
-
 class SpectralInterpolationND(nn.Module):
     def __init__(self, Ns, bases, domains):
         """
@@ -497,3 +501,1559 @@ class SpectralInterpolationND(nn.Module):
 
         # Interpolate to evaluation points
         return self.interpolate(x_eval, values=dk_nodes)
+
+
+# %% [markdown]
+# ## MLP
+
+# %%
+class MLP(nn.Module):
+    def __init__(self, n_dim=1, hidden_dim=32, activation=torch.tanh):
+        """
+        2-layer MLP that maps (B, n_dim) -> (B, 1)
+        Args:
+            hidden_dim: Dimension of hidden layer
+            activation: Activation function to use (default: tanh)
+        """
+        super().__init__()
+        self.n_dim = n_dim
+        self.activation = activation
+        self.fc1 = nn.Linear(self.n_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, 1)
+
+    def forward(self, x):
+        """
+        Forward pass of the network
+        Args:
+            x: Input tensor of shape (B, n_dim)
+        Returns:
+            Output tensor of shape (B, 1)
+        """
+        assert x.shape[-1] == self.n_dim, f"Input shape must be (..., {self.n_dim})"
+        x = self.activation(self.fc1(x))
+        x = self.fc2(x)
+        return x
+
+
+# %% [markdown]
+# # PDE
+
+# %% [markdown]
+# We look at the 1D advection equation (1 space + 1 time variable, both of which we treat spectrally):
+# $$\frac{\partial u}{\partial t} + c \frac{\partial u}{\partial x} = 0, \quad t \in [0,1], \quad x \in [0,2\pi]$$
+# $$u(0,x) = \sin(x)$$
+#
+# Solution:
+# $$u(t,x) = \sin(x - ct)$$
+#
+# Below, we use $c = 8$ for simplicity. Note that the test case in Wang et al. (2023) uses $c = 80$.
+#
+# Note that we use periodic boundary conditions in x since displacement of a sine wave should be periodic.
+
+# %%
+def compute_pde_loss(model, t_grid, x_grid, ic_x_grid=None, ic_weight=1.0, c=80, temporal_eps=0):
+    """
+    Compute loss for advection equation u_t + c*u_x = 0 with temporal weighting
+    
+    Args:
+        model: SpectralInterpolationND or MLP model
+        t_grid: time points of shape (nt,)
+        x_grid: space points of shape (nx,)
+        ic_x_grid: space points for initial condition of shape (nx_ic,). If None, uses x_grid
+        ic_weight: weight for initial condition loss
+        c: advection speed
+        temporal_eps: parameter for temporal weighting scheme
+        
+    Returns:
+        total_loss: combined PDE and IC loss
+        pde_residual: residual at collocation points
+        ic_residual: residual at initial condition points
+    """
+    if ic_x_grid is None:
+        ic_x_grid = x_grid
+        
+    n_t, n_x = len(t_grid), len(x_grid)
+    
+    # Compute solution and derivatives based on model type
+    if isinstance(model, SpectralInterpolationND):
+        # Spectral model takes separate coordinates
+        u = model.interpolate([t_grid, x_grid])
+        u_t = model.derivative([t_grid, x_grid], k=(1,0))
+        u_x = model.derivative([t_grid, x_grid], k=(0,1))
+        
+        # Compute initial condition on ic_x_grid
+        u_ic = model.interpolate([torch.tensor([0.0]), ic_x_grid])
+        u_ic = u_ic[0]
+    else:
+        # Create mesh grid points for PDE
+        T, X = torch.meshgrid(t_grid, x_grid, indexing='ij')
+        points = torch.stack([T.flatten(), X.flatten()], dim=1)
+        points.requires_grad_(True)
+        
+        # Forward pass and compute gradients
+        u = model(points).reshape(n_t, n_x)
+        grads = torch.autograd.grad(u.sum(), points, create_graph=True)[0]
+        u_t = grads[:, 0].reshape(n_t, n_x)
+        u_x = grads[:, 1].reshape(n_t, n_x)
+        
+        # Compute initial condition
+        ic_points = torch.stack([torch.zeros_like(ic_x_grid), ic_x_grid], dim=1)
+        u_ic = model(ic_points).squeeze()
+    
+    # PDE residual: u_t + c*u_x = 0
+    pde_residual = u_t + c*u_x
+    
+    # Compute per-timestep losses
+    timestep_losses = torch.mean(pde_residual**2, dim=1)  # Mean over space
+    
+    # Compute temporal weights
+    cumsum = torch.cumsum(timestep_losses, dim=0)
+    previous_losses = torch.cat([torch.zeros(1, device=cumsum.device), cumsum[:-1]])
+    weights = torch.exp(-temporal_eps * previous_losses)
+    weights = weights.detach()  # Stop gradient through weights
+    
+    # Apply weights to get final PDE loss
+    pde_loss = torch.mean(weights * timestep_losses)
+    
+    # Initial condition: u(0,x) = sin(x)
+    ic_residual = u_ic - torch.sin(ic_x_grid)
+    ic_loss = torch.mean(ic_residual**2)
+    
+    total_loss = pde_loss / ic_weight + ic_loss
+    
+    # print(f"total {total_loss}, pde {pde_loss}, ic {ic_loss}")
+    return total_loss, pde_residual, ic_residual
+
+
+# %%
+def train_one_epoch(model, optimizer, t_grid, x_grid, ic_x_grid, ic_weight=1.0, c=80, temporal_eps=0):
+    """
+    Train model for one epoch on given grids
+    
+    Args:
+        model: SpectralInterpolationND or MLP model
+        optimizer: PyTorch optimizer
+        t_grid: time points (nt,)
+        x_grid: space points (nx,)
+        ic_x_grid: initial condition points (nx_ic,)
+        ic_weight: weight for initial condition loss
+        c: advection speed
+        
+    Returns:
+        dict containing loss values and residuals
+    """
+    optimizer.zero_grad()
+
+    # Compute loss
+    loss, pde_residual, ic_residual = compute_pde_loss(
+        model,
+        t_grid,
+        x_grid,
+        ic_x_grid,
+        ic_weight=ic_weight,
+        c=c,
+        temporal_eps=temporal_eps,
+    )
+
+    # Backward and optimize
+    loss.backward()
+    optimizer.step()
+    
+    return {
+        'loss': loss.item(),
+        'pde_residual': torch.mean(pde_residual**2).item(),
+        'ic_residual': torch.mean(ic_residual**2).item()
+    }
+
+
+# %%
+def get_training_grids(model=None, n_t=32, n_x=32, n_ic=32, t_max=1):
+    """
+    Get training grids either from model or create new ones
+    
+    Args:
+        model: if SpectralInterpolationND, use its nodes. If None or MLP, create new grids
+        n_t: number of time points (if not using model grid)
+        n_x: number of space points (if not using model grid)
+        n_ic: number of IC points (if None, use n_x)
+    
+    Returns:
+        t_grid: time points
+        x_grid: space points
+        ic_x_grid: initial condition points
+    """
+    if model is None:
+        # Cheb
+        # t_grid = torch.cos(torch.linspace(0, 2*np.pi, n_t))*(t_max/2) + (t_max/2)
+        # Random cheb
+        t_grid = torch.cos(torch.rand(n_t)*2*np.pi)*(t_max/2) + (t_max/2)
+        # Fourier
+        # x_grid = torch.linspace(0, 2*np.pi, n_x)
+        # ic_x_grid = torch.linspace(0, 2*np.pi, n_ic)
+        # Random Fourier
+        x_grid = torch.cat([
+            torch.linspace(0, 2*np.pi, n_x//2),
+            torch.rand(n_x//2)*2*np.pi,
+        ])
+        ic_x_grid = torch.cat([
+            torch.linspace(0, 2*np.pi, n_ic//2),
+            torch.rand(n_ic//2)*2*np.pi,
+        ])
+    if isinstance(model, SpectralInterpolationND):
+        t_grid = model.nodes[0]
+        x_grid = model.nodes[1]
+        ic_x_grid = x_grid  # Could be different if desired
+    else:
+        t_grid = torch.cos(torch.linspace(0, 2*np.pi, n_t))*(t_max/2) + (t_max/2)
+        x_grid = torch.linspace(0, 2*np.pi, n_x)
+        ic_x_grid = torch.linspace(0, 2*np.pi, n_ic)
+        
+    return t_grid, x_grid, ic_x_grid
+
+
+# %%
+def evaluate_model(model, t_eval, x_eval, c=80):
+    """
+    Evaluate model against exact solution
+    
+    Args:
+        model: SpectralInterpolationND or MLP model
+        t_eval: evaluation time points
+        x_eval: evaluation space points
+        c: advection speed
+        
+    Returns:
+        dict containing predicted and exact solutions and error
+    """
+    with torch.no_grad():
+        if isinstance(model, SpectralInterpolationND):
+            u_pred = model.interpolate([t_eval, x_eval])
+        else:
+            T, X = torch.meshgrid(t_eval, x_eval, indexing='ij')
+            points = torch.stack([T.flatten(), X.flatten()], dim=1)
+            u_pred = model(points).reshape(T.shape)
+            
+        u_exact = torch.sin(x_eval[None, :] - c*t_eval[:, None])
+        l2_error = torch.mean((u_pred - u_exact)**2).sqrt()
+        
+    return {
+        'u_pred': u_pred,
+        'u_exact': u_exact,
+        'l2_error': l2_error.item()
+    }
+
+
+# %%
+# Early stopping with best model tracking
+class EarlyStopping:
+    def __init__(self, patience=100, min_delta=1e-6):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best_loss = None
+        self.early_stop = False
+        self.best_state = None
+
+    def __call__(self, val_loss, model):
+        if self.best_loss is None:
+            self.best_loss = val_loss
+            self.best_state = {k: v.clone() for k, v in model.state_dict().items()}
+        elif val_loss > self.best_loss - self.min_delta:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_loss = val_loss
+            self.best_state = {k: v.clone() for k, v in model.state_dict().items()}
+            self.counter = 0
+            
+        return self.best_loss
+
+
+# %%
+def train_advection(model, n_epochs=1000, lr=1e-3, ic_weight=1.0, c=80, plot_every=100):
+    """
+    Train model to solve the advection equation
+    """
+    # Get training and evaluation grids
+    t_grid, x_grid, ic_x_grid = get_training_grids(
+        None,
+        n_t=2*c+1,
+        n_x=2*c,
+        n_ic=2*c
+    )
+    n_eval = 100
+    t_eval = torch.linspace(0, 1, n_eval)
+    x_eval = torch.linspace(0, 2*np.pi, n_eval)
+    
+    # Setup optimizer and scheduler
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=50, verbose=True, min_lr=1e-6
+    )
+    early_stopping = EarlyStopping(patience=150, min_delta=1e-20)
+    
+    # Training history
+    history = {
+        'loss': [], 'pde_residual': [], 'ic_residual': [], 
+        'l2_error': [], 'learning_rates': [],
+    }
+    
+    print("Starting training...")
+    time_start = time()
+    
+    for epoch in tqdm(range(n_epochs)):
+        
+        # Get training and evaluation grids
+        t_grid, x_grid, ic_x_grid = get_training_grids(
+            None,
+            n_t=2*c+1,
+            n_x=2*c,
+            n_ic=2*c
+        )
+
+        # Train one epoch
+        epoch_results = train_one_epoch(
+            model, optimizer, t_grid, x_grid, ic_x_grid, ic_weight, c
+        )
+        
+        # Evaluate
+        eval_results = evaluate_model(model, t_eval, x_eval, c)
+        
+        # Update history
+        current_time = time() - time_start
+        history['loss'].append(epoch_results['loss'])
+        history['pde_residual'].append(epoch_results['pde_residual'])
+        history['ic_residual'].append(epoch_results['ic_residual'])
+        history['l2_error'].append(eval_results['l2_error'])
+        history['learning_rates'].append(optimizer.param_groups[0]['lr'])
+        
+        # Learning rate scheduling and early stopping
+        scheduler.step(epoch_results['loss'])
+        early_stopping(eval_results['l2_error'], model)
+        
+        # Print and plot progress
+        if (epoch + 1) % plot_every == 0:
+            print(f"\nEpoch {epoch+1}/{n_epochs}, Time: {current_time:.2f}s")
+            print(f"Loss: {epoch_results['loss']:.2e}, L2 Error: {eval_results['l2_error']:.2e}")
+            print(f"Learning rate: {optimizer.param_groups[0]['lr']:.2e}")
+            
+            # Plot current solution
+            plt.figure(figsize=(15, 5))
+            
+            # Plot predicted solution
+            plt.subplot(131)
+            plt.imshow(eval_results['u_pred'].T, aspect='auto', 
+                      extent=[0, 1, 0, 2*np.pi], cmap='viridis')
+            plt.colorbar(label='u')
+            plt.title('Predicted Solution')
+            plt.xlabel('t')
+            plt.ylabel('x')
+            
+            # Plot exact solution
+            plt.subplot(132)
+            plt.imshow(eval_results['u_exact'].T, aspect='auto', 
+                      extent=[0, 1, 0, 2*np.pi], cmap='viridis')
+            plt.colorbar(label='u')
+            plt.title('Exact Solution')
+            plt.xlabel('t')
+            plt.ylabel('x')
+            
+            # Plot error
+            plt.subplot(133)
+            plt.imshow(torch.abs(eval_results['u_pred'] - eval_results['u_exact']).T, 
+                      aspect='auto', extent=[0, 1, 0, 2*np.pi], cmap='magma')
+            plt.colorbar(label='|error|')
+            plt.title('Absolute Error')
+            plt.xlabel('t')
+            plt.ylabel('x')
+            
+            plt.tight_layout()
+            plt.show()
+        
+        if early_stopping.early_stop:
+            print(f"\nEarly stopping triggered at epoch {epoch}")
+            break
+    
+    # Load best model
+    model.load_state_dict(early_stopping.best_state)
+    time_elapsed = time() - time_start
+    
+    # Final plotting - Training history
+    plt.figure(figsize=(15, 5))
+    
+    plt.subplot(131)
+    plt.semilogy(range(len(history['loss'])), history['loss'])
+    plt.title('Loss vs Epochs')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    
+    plt.subplot(132)
+    plt.semilogy(range(len(history['l2_error'])), history['l2_error'])
+    plt.title('L2 Error vs Epochs')
+    plt.xlabel('Epoch')
+    plt.ylabel('L2 Error')
+    
+    plt.subplot(133)
+    plt.semilogy(range(len(history['learning_rates'])), history['learning_rates'])
+    plt.title('Learning Rate vs Epochs')
+    plt.xlabel('Epoch')
+    plt.ylabel('Learning Rate')
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Final solution evaluation and plot
+    final_eval = evaluate_model(model, t_eval, x_eval, c)
+    
+    plt.figure(figsize=(15, 5))
+    
+    plt.subplot(131)
+    plt.imshow(final_eval['u_pred'].T, aspect='auto', 
+              extent=[0, 1, 0, 2*np.pi], cmap='viridis')
+    plt.colorbar(label='u')
+    plt.title('Final Predicted Solution')
+    plt.xlabel('t')
+    plt.ylabel('x')
+    
+    plt.subplot(132)
+    plt.imshow(final_eval['u_exact'].T, aspect='auto', 
+              extent=[0, 1, 0, 2*np.pi], cmap='viridis')
+    plt.colorbar(label='u')
+    plt.title('Exact Solution')
+    plt.xlabel('t')
+    plt.ylabel('x')
+    
+    plt.subplot(133)
+    plt.imshow(torch.abs(final_eval['u_pred'] - final_eval['u_exact']).T, 
+              aspect='auto', extent=[0, 1, 0, 2*np.pi], cmap='magma')
+    plt.colorbar(label='|error|')
+    plt.title('Final Absolute Error')
+    plt.xlabel('t')
+    plt.ylabel('x')
+    
+    plt.tight_layout()
+    plt.show()
+
+    print(f"\nTraining completed in {time_elapsed:.2f} seconds")
+    print(f"Best L2 error: {min(history['l2_error']):.2e}")
+
+    return history
+
+
+# %% [markdown]
+# ### Run the models
+
+# %%
+import torch
+import numpy as np
+from time import time
+
+# Set random seed for reproducibility
+torch.manual_seed(42)
+
+# Spectral model
+Ns = [21, 20]  # 21 (odd) Chebyshev points in time, 20 (even) Fourier points in space
+bases = ["chebyshev", "fourier"]  # Chebyshev in time, Fourier in space
+domains = [(0, 1), (0, 2*np.pi)]  # t ∈ [0,1], x ∈ [0,2π]
+spectral_model = SpectralInterpolationND(Ns, bases, domains)
+
+# MLP model
+mlp_model = MLP(n_dim=2, hidden_dim=64, activation=torch.tanh)
+
+# Train both models
+print("Training Spectral Model...")
+history_spectral = train_advection(
+    spectral_model,
+    n_epochs=1000,
+    lr=0.01,
+    ic_weight=10.0,
+    c=80,
+    plot_every=100
+)
+
+print("\nTraining MLP Model...")
+history_mlp = train_advection(
+    mlp_model,
+    n_epochs=1000,
+    lr=0.01,
+    ic_weight=10.0,
+    c=80,
+    plot_every=100
+)
+
+# Compare final L2 errors
+print("\nFinal Results:")
+print(f"Spectral Model - Best L2 error: {min(history_spectral['l2_error']):.2e}")
+print(f"MLP Model - Best L2 error: {min(history_mlp['l2_error']):.2e}")
+
+# Plot comparison
+plt.figure(figsize=(15, 5))
+
+plt.subplot(131)
+plt.semilogy(range(len(history_spectral['loss'])), history_spectral['loss'], label='Spectral')
+plt.semilogy(range(len(history_mlp['loss'])), history_mlp['loss'], label='MLP')
+plt.title('Loss vs Epochs')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+
+plt.subplot(132)
+plt.semilogy(range(len(history_spectral['l2_error'])), history_spectral['l2_error'], label='Spectral')
+plt.semilogy(range(len(history_mlp['l2_error'])), history_mlp['l2_error'], label='MLP')
+plt.title('L2 Error vs Epochs')
+plt.xlabel('Epoch')
+plt.ylabel('L2 Error')
+plt.legend()
+
+plt.subplot(133)
+plt.semilogy(range(len(history_spectral['learning_rates'])), history_spectral['learning_rates'], label='Spectral')
+plt.semilogy(range(len(history_mlp['learning_rates'])), history_mlp['learning_rates'], label='MLP')
+plt.title('Learning Rate vs Epochs')
+plt.xlabel('Epoch')
+plt.ylabel('Learning Rate')
+plt.legend()
+
+plt.tight_layout()
+plt.show()
+
+
+# %% [markdown]
+# # Hacking: L-BFGS. Also doesn't really work at all
+
+# %%
+def train_advection_lbfgs(model, n_epochs=1000, max_iter=20, lr=1.0, history_size=50, 
+                           ic_weight=1.0, c=80, plot_every=100):
+    """
+    Train model to solve the advection equation using L-BFGS optimization
+    
+    Args:
+        model: Neural network model
+        n_epochs: Maximum number of epochs
+        max_iter: Maximum number of iterations per L-BFGS step
+        lr: Learning rate for L-BFGS
+        history_size: Number of iterations to keep for L-BFGS history
+        ic_weight: Weight for initial condition loss
+        c: Advection speed
+        plot_every: Plot interval
+    """
+    # Get training and evaluation grids
+    t_grid, x_grid, ic_x_grid = get_training_grids(
+        None,
+        n_t=2*c+1,
+        n_x=2*c,
+        n_ic=2*c
+    )
+    n_eval = 100
+    t_eval = torch.linspace(0, 1, n_eval)
+    x_eval = torch.linspace(0, 2*np.pi, n_eval)
+    
+    # Setup L-BFGS optimizer
+    optimizer = optim.LBFGS(
+        model.parameters(),
+        lr=lr,
+        max_iter=max_iter,
+        history_size=history_size,
+        line_search_fn='strong_wolfe'
+    )
+    
+    early_stopping = EarlyStopping(patience=20, min_delta=1e-20)
+    
+    # Training history
+    history = {
+        'loss': [], 'pde_residual': [], 'ic_residual': [], 
+        'l2_error': [], 'function_evals': []
+    }
+    
+    print("Starting training...")
+    time_start = time()
+    
+    # Current loss values for closure
+    current_loss = {'total': None, 'pde': None, 'ic': None}
+    
+    def closure():
+        optimizer.zero_grad()
+        loss, pde_residual, ic_residual = compute_pde_loss(
+            model, t_grid, x_grid, ic_x_grid, ic_weight, c
+        )
+        loss.backward()
+        
+        # Store current loss values
+        current_loss['total'] = loss.item()
+        current_loss['pde'] = torch.mean(pde_residual**2).item()
+        current_loss['ic'] = torch.mean(ic_residual**2).item()
+        
+        return loss
+    
+    for epoch in tqdm(range(n_epochs)):
+        # Perform L-BFGS step
+        optimizer.step(closure)
+        
+        # Get loss values from last closure call
+        epoch_results = {
+            'loss': current_loss['total'],
+            'pde_residual': current_loss['pde'],
+            'ic_residual': current_loss['ic']
+        }
+        
+        # Evaluate
+        eval_results = evaluate_model(model, t_eval, x_eval, c)
+        
+        # Update history
+        current_time = time() - time_start
+        history['loss'].append(epoch_results['loss'])
+        history['pde_residual'].append(epoch_results['pde_residual'])
+        history['ic_residual'].append(epoch_results['ic_residual'])
+        history['l2_error'].append(eval_results['l2_error'])
+        history['function_evals'].append(optimizer.state_dict()['state'][0]['n_iter'])
+        
+        # Early stopping
+        early_stopping(eval_results['l2_error'], model)
+        
+        # Print and plot progress
+        if (epoch + 1) % plot_every == 0:
+            print(f"\nEpoch {epoch+1}/{n_epochs}, Time: {current_time:.2f}s")
+            print(f"Loss: {epoch_results['loss']:.2e}, L2 Error: {eval_results['l2_error']:.2e}")
+            print(f"Function evaluations: {optimizer.state_dict()['state'][0]['n_iter']}")
+            
+            # Plot current solution
+            plt.figure(figsize=(15, 5))
+            
+            # Plot predicted solution
+            plt.subplot(131)
+            plt.imshow(eval_results['u_pred'].T, aspect='auto', 
+                      extent=[0, 1, 0, 2*np.pi], cmap='viridis')
+            plt.colorbar(label='u')
+            plt.title('Predicted Solution')
+            plt.xlabel('t')
+            plt.ylabel('x')
+            
+            # Plot exact solution
+            plt.subplot(132)
+            plt.imshow(eval_results['u_exact'].T, aspect='auto', 
+                      extent=[0, 1, 0, 2*np.pi], cmap='viridis')
+            plt.colorbar(label='u')
+            plt.title('Exact Solution')
+            plt.xlabel('t')
+            plt.ylabel('x')
+            
+            # Plot error
+            plt.subplot(133)
+            plt.imshow(torch.abs(eval_results['u_pred'] - eval_results['u_exact']).T, 
+                      aspect='auto', extent=[0, 1, 0, 2*np.pi], cmap='magma')
+            plt.colorbar(label='|error|')
+            plt.title('Absolute Error')
+            plt.xlabel('t')
+            plt.ylabel('x')
+            
+            plt.tight_layout()
+            plt.show()
+        
+        if early_stopping.early_stop:
+            print(f"\nEarly stopping triggered at epoch {epoch}")
+            break
+    
+    # Load best model
+    model.load_state_dict(early_stopping.best_state)
+    time_elapsed = time() - time_start
+    
+    # Final plotting - Training history
+    plt.figure(figsize=(15, 5))
+    
+    plt.subplot(131)
+    plt.semilogy(range(len(history['loss'])), history['loss'])
+    plt.title('Loss vs Epochs')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    
+    plt.subplot(132)
+    plt.semilogy(range(len(history['l2_error'])), history['l2_error'])
+    plt.title('L2 Error vs Epochs')
+    plt.xlabel('Epoch')
+    plt.ylabel('L2 Error')
+    
+    plt.subplot(133)
+    plt.plot(range(len(history['function_evals'])), history['function_evals'])
+    plt.title('Cumulative Function Evaluations')
+    plt.xlabel('Epoch')
+    plt.ylabel('Number of Evaluations')
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Final solution evaluation and plot
+    final_eval = evaluate_model(model, t_eval, x_eval, c)
+    
+    plt.figure(figsize=(15, 5))
+    
+    plt.subplot(131)
+    plt.imshow(final_eval['u_pred'].T, aspect='auto', 
+              extent=[0, 1, 0, 2*np.pi], cmap='viridis')
+    plt.colorbar(label='u')
+    plt.title('Final Predicted Solution')
+    plt.xlabel('t')
+    plt.ylabel('x')
+    
+    plt.subplot(132)
+    plt.imshow(final_eval['u_exact'].T, aspect='auto', 
+              extent=[0, 1, 0, 2*np.pi], cmap='viridis')
+    plt.colorbar(label='u')
+    plt.title('Exact Solution')
+    plt.xlabel('t')
+    plt.ylabel('x')
+    
+    plt.subplot(133)
+    plt.imshow(torch.abs(final_eval['u_pred'] - final_eval['u_exact']).T, 
+              aspect='auto', extent=[0, 1, 0, 2*np.pi], cmap='magma')
+    plt.colorbar(label='|error|')
+    plt.title('Final Absolute Error')
+    plt.xlabel('t')
+    plt.ylabel('x')
+    
+    plt.tight_layout()
+    plt.show()
+
+    print(f"\nTraining completed in {time_elapsed:.2f} seconds")
+    print(f"Best L2 error: {min(history['l2_error']):.2e}")
+    print(f"Total function evaluations: {history['function_evals'][-1]}")
+
+    return history
+
+
+# %%
+# Spectral model
+Ns = [101, 20]  # 101 (odd) Chebyshev points in time, 20 (even) Fourier points in space
+bases = ["chebyshev", "fourier"]  # Chebyshev in time, Fourier in space
+domains = [(0, 1), (0, 2*np.pi)]  # t ∈ [0,1], x ∈ [0,2π]
+spectral_model = SpectralInterpolationND(Ns, bases, domains)
+
+history = train_advection_lbfgs(
+    spectral_model,
+    n_epochs=1000,
+    max_iter=100,  # Max L-BFGS iterations per step
+    lr=1.0,       # Initial step size
+    history_size=100,  # Number of previous iterations to use
+    ic_weight=10.0,
+    c=80
+)
+
+# %%
+# Spectral model
+Ns = [101, 80]  # 101 (odd) Chebyshev points in time, 80 (even) Fourier points in space
+bases = ["chebyshev", "fourier"]  # Chebyshev in time, Fourier in space
+domains = [(0, 1), (0, 2*np.pi)]  # t ∈ [0,1], x ∈ [0,2π]
+spectral_model = SpectralInterpolationND(Ns, bases, domains)
+
+history = train_advection_lbfgs(
+    spectral_model,
+    n_epochs=1000,
+    max_iter=100,  # Max L-BFGS iterations per step
+    lr=1.0,       # Initial step size
+    history_size=100,  # Number of previous iterations to use
+    ic_weight=10.0,
+    c=80
+)
+
+# %%
+history_spectral = train_advection(
+    spectral_model,
+    n_epochs=1000,
+    lr=1e-3,
+    ic_weight=10.0,
+    c=80,
+    plot_every=100
+)
+
+# %%
+history_spectral = train_advection(
+    spectral_model,
+    n_epochs=1000,
+    lr=1e-3,
+    ic_weight=1000.0,
+    c=80,
+    plot_every=100
+)
+
+# %%
+Ns = [101, 20]  # 101 (odd) Chebyshev points in time, 20 (even) Fourier points in space
+bases = ["chebyshev", "fourier"]  # Chebyshev in time, Fourier in space
+domains = [(0, 1), (0, 2*np.pi)]  # t ∈ [0,1], x ∈ [0,2π]
+spectral_model = SpectralInterpolationND(Ns, bases, domains)
+
+history_spectral = train_advection(
+    spectral_model,
+    n_epochs=1000,
+    lr=1e-2,
+    ic_weight=np.inf,
+    c=80,
+    plot_every=100
+)
+
+# %%
+# Eval points (from code)
+# n_eval = 100
+# t_eval = torch.linspace(0, 1, n_eval)
+# x_eval = torch.linspace(0, 2*np.pi, n_eval)
+
+# Train points (from code)
+c = 80
+t_eval, x_eval, _ = get_training_grids(
+    None,
+    n_t=2*c+1,
+    n_x=2*c,
+    n_ic=2*c
+)
+model = spectral_model
+
+# Final solution evaluation and plot
+final_eval = evaluate_model(model, t_eval, x_eval, c=80)
+print(model.values[-1])
+
+plt.figure(figsize=(15, 5))
+
+plt.subplot(131)
+plt.imshow(final_eval['u_pred'].T, aspect='auto', 
+          extent=[0, 1, 0, 2*np.pi], cmap='viridis')
+plt.colorbar(label='u')
+plt.title('Final Predicted Solution')
+plt.xlabel('t')
+plt.ylabel('x')
+
+plt.subplot(132)
+plt.imshow(final_eval['u_exact'].T, aspect='auto', 
+          extent=[0, 1, 0, 2*np.pi], cmap='viridis')
+plt.colorbar(label='u')
+plt.title('Exact Solution')
+plt.xlabel('t')
+plt.ylabel('x')
+
+plt.subplot(133)
+plt.imshow(torch.abs(final_eval['u_pred'] - final_eval['u_exact']).T, 
+          aspect='auto', extent=[0, 1, 0, 2*np.pi], cmap='magma')
+plt.colorbar(label='|error|')
+plt.title('Final Absolute Error')
+plt.xlabel('t')
+plt.ylabel('x')
+
+plt.tight_layout()
+plt.show()
+
+print(f"\nTraining completed in {time_elapsed:.2f} seconds")
+print(f"Best L2 error: {min(history['l2_error']):.2e}")
+
+# %%
+print(spectral_model.values[-1])
+print(spectral_model.values[-1].shape)
+
+# %%
+torch.sin(torch.linspace(0, 2*torch.pi, 20))
+
+
+# %% [markdown]
+# ## ------ Hacking: Try fixing initial condition
+
+# %%
+def fit_initial_condition(model, x_grid):
+    """
+    Fit initial condition u(0,x) = sin(x) exactly using 1D spectral interpolation
+    
+    Args:
+        model: SpectralInterpolationND instance
+        x_grid: Spatial grid points
+    """
+    # Extract initial values at t=0 from the model's values
+    t0_idx = 0  # Index for t=0 in the model's grid
+    ic_values = model.values[t0_idx]
+    
+    # Set these values to match sin(x)
+    with torch.no_grad():
+        ic_values[:] = torch.sin(x_grid)
+    
+    # Zero out all other time slices
+    model.values[1:] = 0.0
+
+def compute_pde_loss_fixed_ic(model, t_grid, x_grid, c=80):
+    """
+    Compute PDE loss without IC term (since IC is exactly satisfied)
+    """
+    n_t, n_x = len(t_grid), len(x_grid)
+    
+    # Compute solution and derivatives
+    u = model.interpolate([t_grid, x_grid])
+    u_t = model.derivative([t_grid, x_grid], k=(1,0))
+    u_x = model.derivative([t_grid, x_grid], k=(0,1))
+    
+    # PDE residual: u_t + c*u_x = 0
+    pde_residual = u_t + c*u_x
+    
+    # Compute loss
+    pde_loss = torch.mean(pde_residual**2)
+    
+    return pde_loss, pde_residual
+
+def train_one_epoch_fixed_ic(model, optimizer, t_grid, x_grid, c=80):
+    """
+    Train model for one epoch with fixed IC
+    """
+    optimizer.zero_grad()
+    
+    # Compute loss (only PDE term since IC is fixed)
+    loss, pde_residual = compute_pde_loss_fixed_ic(model, t_grid, x_grid, c)
+    
+    # Backward and optimize
+    loss.backward()
+    
+    # Zero out gradients for IC parameters (t=0 slice)
+    with torch.no_grad():
+        print(model.values.grad.shape)
+        model.values.grad[-1] = 0.0
+    
+    optimizer.step()
+    
+    return {
+        'loss': loss.item(),
+        'pde_residual': torch.mean(pde_residual**2).item()
+    }
+
+def train_advection_fixed_ic(model, n_epochs=1000, lr=1e-3, c=80, plot_every=100):
+    """
+    Train model to solve advection equation with fixed initial condition
+    """
+    # Get training and evaluation grids
+    t_grid, x_grid, _ = get_training_grids(
+        None,
+        n_t=2*c+1,
+        n_x=2*c,
+        n_ic=2*c
+    )
+    n_eval = 100
+    t_eval = torch.linspace(0, 1, n_eval)
+    x_eval = torch.linspace(0, 2*np.pi, n_eval)
+    
+    print("Phase 1: Fitting initial condition...")
+    # First phase: Fit initial condition exactly
+    fit_initial_condition(model, x_grid)
+    
+    print("Phase 2: Training PDE solution...")
+    # Second phase: Setup optimizer for PDE training
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=50, verbose=True, min_lr=1e-6
+    )
+    early_stopping = EarlyStopping(patience=150, min_delta=1e-20)
+    
+    # Training history
+    history = {
+        'loss': [], 'pde_residual': [], 'l2_error': [], 'learning_rates': []
+    }
+    
+    print("Starting PDE training...")
+    time_start = time()
+    
+    for epoch in tqdm(range(n_epochs)):
+        # Train one epoch
+        epoch_results = train_one_epoch_fixed_ic(
+            model, optimizer, t_grid, x_grid, c
+        )
+        
+        # Evaluate
+        eval_results = evaluate_model(model, t_eval, x_eval, c)
+        
+        # Update history
+        current_time = time() - time_start
+        history['loss'].append(epoch_results['loss'])
+        history['pde_residual'].append(epoch_results['pde_residual'])
+        history['l2_error'].append(eval_results['l2_error'])
+        history['learning_rates'].append(optimizer.param_groups[0]['lr'])
+        
+        # Learning rate scheduling and early stopping
+        scheduler.step(epoch_results['loss'])
+        early_stopping(eval_results['l2_error'], model)
+        
+        # Print and plot progress
+        if (epoch + 1) % plot_every == 0:
+            print(f"\nEpoch {epoch+1}/{n_epochs}, Time: {current_time:.2f}s")
+            print(f"Loss: {epoch_results['loss']:.2e}, L2 Error: {eval_results['l2_error']:.2e}")
+            print(f"Learning rate: {optimizer.param_groups[0]['lr']:.2e}")
+            
+            # Plot current solution
+            plt.figure(figsize=(15, 5))
+            
+            # Plot predicted solution
+            plt.subplot(131)
+            plt.imshow(eval_results['u_pred'].T, aspect='auto', 
+                      extent=[0, 1, 0, 2*np.pi], cmap='viridis')
+            plt.colorbar(label='u')
+            plt.title('Predicted Solution')
+            plt.xlabel('t')
+            plt.ylabel('x')
+            
+            # Plot exact solution
+            plt.subplot(132)
+            plt.imshow(eval_results['u_exact'].T, aspect='auto', 
+                      extent=[0, 1, 0, 2*np.pi], cmap='viridis')
+            plt.colorbar(label='u')
+            plt.title('Exact Solution')
+            plt.xlabel('t')
+            plt.ylabel('x')
+            
+            # Plot error
+            plt.subplot(133)
+            plt.imshow(torch.abs(eval_results['u_pred'] - eval_results['u_exact']).T, 
+                      aspect='auto', extent=[0, 1, 0, 2*np.pi], cmap='magma')
+            plt.colorbar(label='|error|')
+            plt.title('Absolute Error')
+            plt.xlabel('t')
+            plt.ylabel('x')
+            
+            plt.tight_layout()
+            plt.show()
+        
+        if early_stopping.early_stop:
+            print(f"\nEarly stopping triggered at epoch {epoch}")
+            break
+    
+    # Load best model
+    model.load_state_dict(early_stopping.best_state)
+    time_elapsed = time() - time_start
+    
+    # Final plotting
+    plt.figure(figsize=(15, 5))
+    
+    plt.subplot(131)
+    plt.semilogy(range(len(history['loss'])), history['loss'])
+    plt.title('Loss vs Epochs')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    
+    plt.subplot(132)
+    plt.semilogy(range(len(history['l2_error'])), history['l2_error'])
+    plt.title('L2 Error vs Epochs')
+    plt.xlabel('Epoch')
+    plt.ylabel('L2 Error')
+    
+    plt.subplot(133)
+    plt.semilogy(range(len(history['learning_rates'])), history['learning_rates'])
+    plt.title('Learning Rate vs Epochs')
+    plt.xlabel('Epoch')
+    plt.ylabel('Learning Rate')
+    
+    plt.tight_layout()
+    plt.show()
+    
+    print(f"\nTraining completed in {time_elapsed:.2f} seconds")
+    print(f"Best L2 error: {min(history['l2_error']):.2e}")
+
+    return history
+
+
+# %%
+# Spectral model
+Ns = [101, 20]  # 101 (odd) Chebyshev points in time, 20 (even) Fourier points in space
+bases = ["chebyshev", "fourier"]  # Chebyshev in time, Fourier in space
+domains = [(0, 1), (0, 2*np.pi)]  # t ∈ [0,1], x ∈ [0,2π]
+spectral_model = SpectralInterpolationND(Ns, bases, domains)
+
+history = train_advection_fixed_ic(
+    model,
+    n_epochs=1000,
+    lr=1e-3,
+    c=80
+)
+
+
+# %% [markdown]
+# # ------------------------- Hacking below: early stopping, adaptive step rate, weighting the loss function to be causal, changing the domain
+
+# %%
+# Early stopping with best model tracking
+class EarlyStopping:
+    def __init__(self, patience=100, min_delta=1e-6):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best_loss = None
+        self.early_stop = False
+        self.best_state = None
+
+    def __call__(self, val_loss, model):
+        if self.best_loss is None:
+            self.best_loss = val_loss
+            self.best_state = {k: v.clone() for k, v in model.state_dict().items()}
+        elif val_loss > self.best_loss - self.min_delta:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_loss = val_loss
+            self.best_state = {k: v.clone() for k, v in model.state_dict().items()}
+            self.counter = 0
+        return self.best_loss
+
+
+# %%
+import torch
+from torch.optim import Optimizer
+from torch.optim.lr_scheduler import _LRScheduler
+
+class AdaptiveStepLR(_LRScheduler):
+    def __init__(
+        self,
+        optimizer,
+        step_size,
+        gamma=0.1,
+        threshold=1e-6,
+        last_epoch=-1,
+        # For adaptive threshold
+        gradient_variance_metric_lambda=0.9,
+        gradient_variance_threshold=0.9,
+        no_increase_length=1e3,
+    ):
+        self.step_size = step_size
+        self.gamma = gamma
+        self.threshold = threshold
+
+        self.gradient_variance_metric_ema = 1.0
+        self.gradient_variance_metric_lambda = gradient_variance_metric_lambda
+        self.gradient_variance_threshold = gradient_variance_threshold
+        self.no_increase_length = no_increase_length
+        self.should_decrement = True
+        super(AdaptiveStepLR, self).__init__(optimizer, last_epoch)
+
+    def update_gradient_variance_metric(self, gradient_variance_metric):
+        self.gradient_variance_metric_ema = self.gradient_variance_metric_lambda * self.gradient_variance_metric_ema + (1 - self.gradient_variance_metric_lambda) * gradient_variance_metric
+        if self.gradient_variance_metric_ema < self.gradient_variance_threshold and self.last_epoch > self.no_increase_length:
+            self.should_decrement = False
+        else:
+            self.should_decrement = True
+
+    def get_lr(self):
+        new_lrs = []
+        for base_lr in self.base_lrs:
+            # Start with current learning rate
+            lr = self.optimizer.param_groups[0]['lr']
+
+            # Apply multiplicative factor based on the flags
+            if self.last_epoch % self.step_size == 0:
+                if self.should_decrement:
+                    lr = max(lr * self.gamma, self.threshold)  # Decrease LR
+                else:
+                    lr = lr / self.gamma  # Increase LR
+
+            new_lrs.append(lr)
+
+        return new_lrs
+
+
+
+# %%
+def get_current_gradients(model, n_batches=16, _helper_get_training_grids=None, ic_weight=1.0, c=80, temporal_eps=0.1):
+    """
+    Compute gradients for PDE problem multiple times to get statistics
+    """
+    gradients = []
+    
+    prev_t_grid = None
+    for _ in range(n_batches):
+        
+        # Get training grids
+        t_max=1/100
+        n_t = 2*11+1
+        n_x = 2*c
+        n_ic = 2*c
+        t_grid = torch.cos(torch.rand(n_t)*2*np.pi)*(t_max/2) + (t_max/2)
+        x_grid = torch.linspace(0, 2*np.pi, n_x)
+        ic_x_grid = torch.linspace(0, 2*np.pi, n_ic)
+        
+        if prev_t_grid is not None:
+            print(t_grid == prev_t_grid)
+        
+        # Zero gradients
+        model.zero_grad()
+        
+        # Compute loss
+        loss, _, _ = compute_pde_loss(
+            model,
+            t_grid,
+            x_grid,
+            ic_x_grid,
+            ic_weight=ic_weight,
+            c=c,
+            temporal_eps=temporal_eps,
+        )
+        
+        # Backward
+        loss.backward()
+        
+        # Collect gradients
+        batch_gradients = []
+        for param in model.parameters():
+            if param.grad is not None:
+                batch_gradients.append(param.grad.view(-1).clone())
+        batch_gradients = torch.cat(batch_gradients)
+        gradients.append(batch_gradients)
+        print(torch.all(gradients[-1] == torch.zeros_like(gradients[-1])))
+        print(torch.norm(gradients[-1]))
+        
+        prev_t_grid = t_grid
+        
+    gradients = torch.stack(gradients)
+    # print(gradients[0] == gradients[-1])
+    return gradients
+
+def compute_gradient_stats(gradients, prefix=""):
+    """
+    Compute gradient statistics for PDE problem
+    """
+    # Compute cosine similarities between consecutive gradients
+    cosine_sims = []
+    for i in range(1, len(gradients)):
+        cosine_sim = torch.nn.functional.cosine_similarity(
+            gradients[i-1].unsqueeze(0), 
+            gradients[i].unsqueeze(0)
+        ).item()
+        cosine_sims.append(cosine_sim)
+    cosine_sims = torch.tensor(cosine_sims)
+    
+    return {
+        "gradient_cosine_mean": torch.mean(cosine_sims).item(),
+        "gradient_cosine_variance": torch.var(cosine_sims, unbiased=True).item(),
+        "gradient_l2_norm": torch.norm(gradients, p=2, dim=1).mean().item()
+    }
+
+def compute_current_gradient_stats(model, _helper_get_training_grids, n_batches=16, **kwargs):
+    """
+    Main function to compute gradient statistics for PDE problem
+    """
+    gradients = get_current_gradients(model, n_batches, _helper_get_training_grids, **kwargs)
+    stats = compute_gradient_stats(gradients)
+    return stats
+
+
+# %%
+def train_advection(model, n_epochs=1000, lr=1e-3, ic_weight=1.0, c=80, plot_every=100, t_max=1, temporal_eps=1):
+    """
+    Train model to solve the advection equation
+    """
+    # Get evaluation grids
+    n_eval = 100
+    t_eval = torch.linspace(0, t_max, n_eval)
+    x_eval = torch.linspace(0, 2*np.pi, n_eval)
+    
+    # Define lambda for get training grid
+    def _helper_get_training_grids():
+        return get_training_grids(
+            None, #model,
+            n_t=2*c+1,
+            n_x=2*c,
+            n_ic=2*c,
+            t_max=t_max,
+        )
+    
+    # Setup optimizer and scheduler
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    # optimizer = optim.SGD(model.parameters(), lr=lr)
+    scheduler = AdaptiveStepLR(
+        optimizer,
+        step_size=50,  # Check every 50 epochs
+        gamma=0.9,     # Halve/double the learning rate
+        threshold=1e-6,
+        gradient_variance_metric_lambda=0.9,
+        gradient_variance_threshold=0.9,
+        no_increase_length=100
+    )
+    early_stopping = EarlyStopping(patience=150, min_delta=1e-6)
+    
+    # Training history
+    history = {
+        'loss': [], 
+        'pde_residual': [], 
+        'ic_residual': [], 
+        'l2_error': [], 
+        'learning_rates': [],
+        'grad_cosine_mean': [],
+        'grad_cosine_var': [],
+        'grad_l2_norm': [],
+    }
+    
+    print("Starting training...")
+    
+    time_start = time()
+    
+    for epoch in tqdm(range(n_epochs)):
+        optimizer.zero_grad()
+        
+        # Get training grids
+        t_grid, x_grid, ic_x_grid = _helper_get_training_grids()
+        
+        # Compute loss
+        loss, pde_residual, ic_residual = compute_pde_loss(
+            model,
+            t_grid,
+            x_grid,
+            ic_x_grid,
+            ic_weight=ic_weight,
+            c=c,
+            temporal_eps=temporal_eps,
+        )
+        
+        # Backward and optimize
+        loss.backward()
+        
+        # Compute gradient statistics before optimizer step
+        gradient_stats = compute_current_gradient_stats(
+            model,
+            _helper_get_training_grids=_helper_get_training_grids,
+            n_batches=16,  # Can adjust this
+            ic_weight=ic_weight,
+            c=c,
+            temporal_eps=temporal_eps
+        )
+        
+        # Update scheduler with gradient statistics
+        scheduler.update_gradient_variance_metric(gradient_stats["gradient_cosine_mean"])
+        grad_var_metric = gradient_stats["gradient_cosine_mean"]
+        
+        optimizer.step()
+        scheduler.step()
+        
+        # Evaluate
+        eval_results = evaluate_model(model, t_eval, x_eval, c)
+        
+        # Update history
+        history['loss'].append(loss.item())
+        history['pde_residual'].append(torch.mean(pde_residual**2).item())
+        history['ic_residual'].append(torch.mean(ic_residual**2).item())
+        history['l2_error'].append(eval_results['l2_error'])
+        history['learning_rates'].append(optimizer.param_groups[0]['lr'])
+        history['grad_cosine_mean'].append(gradient_stats["gradient_cosine_mean"])
+        history['grad_cosine_var'].append(gradient_stats["gradient_cosine_variance"])
+        history['grad_l2_norm'].append(gradient_stats["gradient_l2_norm"])
+        
+        # Early stopping check
+        early_stopping(eval_results['l2_error'], model)
+        
+        # if early_stopping.early_stop:
+        #     print(f"\nEarly stopping triggered at epoch {epoch}")
+        #     break
+            
+        # Print and plot progress
+        if (epoch + 1) % plot_every == 0:
+            print(f"\nEpoch {epoch+1}/{n_epochs}")
+            print(f"Loss: {loss.item():.2e}, L2 Error: {eval_results['l2_error']:.2e}")
+            print(f"Learning rate: {optimizer.param_groups[0]['lr']:.2e}")
+            print(f"Gradient variance metric: {grad_var_metric:.2e}")
+            
+            # Plot current solution
+            plt.figure(figsize=(15, 5))
+            
+            # Plot predicted solution
+            plt.subplot(131)
+            plt.imshow(eval_results['u_pred'].T, aspect='auto', 
+                      extent=[0, 1, 0, 2*np.pi], cmap='viridis')
+            plt.colorbar(label='u')
+            plt.title('Predicted Solution')
+            plt.xlabel('t')
+            plt.ylabel('x')
+            
+            # Plot exact solution
+            plt.subplot(132)
+            plt.imshow(eval_results['u_exact'].T, aspect='auto', 
+                      extent=[0, 1, 0, 2*np.pi], cmap='viridis')
+            plt.colorbar(label='u')
+            plt.title('Exact Solution')
+            plt.xlabel('t')
+            plt.ylabel('x')
+            
+            # Plot error
+            plt.subplot(133)
+            plt.imshow(torch.abs(eval_results['u_pred'] - eval_results['u_exact']).T, 
+                      aspect='auto', extent=[0, 1, 0, 2*np.pi], cmap='magma')
+            plt.colorbar(label='|error|')
+            plt.title('Absolute Error')
+            plt.xlabel('t')
+            plt.ylabel('x')
+            
+            plt.tight_layout()
+            plt.show()
+    
+    # Load best model
+    model.load_state_dict(early_stopping.best_state)
+    time_elapsed = time() - time_start
+    
+    # Final plotting - now with gradient variance metric
+    plt.figure(figsize=(15, 10))
+    
+    plt.subplot(221)
+    plt.semilogy(history['loss'])
+    plt.title('Loss vs Epochs')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    
+    plt.subplot(222)
+    plt.semilogy(history['l2_error'])
+    plt.title('L2 Error vs Epochs')
+    plt.xlabel('Epoch')
+    plt.ylabel('L2 Error')
+    
+    plt.subplot(223)
+    plt.semilogy(history['learning_rates'])
+    plt.title('Learning Rate vs Epochs')
+    plt.xlabel('Epoch')
+    plt.ylabel('Learning Rate')
+    
+    plt.subplot(224)
+    plt.plot(history['grad_variance_metric'], label='Instant')
+    plt.plot(history['grad_variance_ema'], label='EMA')
+    plt.axhline(y=scheduler.gradient_variance_threshold, color='r', linestyle='--', label='Threshold')
+    plt.title('Gradient Variance Metric')
+    plt.xlabel('Epoch')
+    plt.ylabel('Cosine Similarity')
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Final solution evaluation and plot
+    final_eval = evaluate_model(model, t_eval, x_eval, c)
+    
+    plt.figure(figsize=(15, 5))
+    
+    plt.subplot(131)
+    plt.imshow(final_eval['u_pred'].T, aspect='auto', 
+              extent=[0, 1, 0, 2*np.pi], cmap='viridis')
+    plt.colorbar(label='u')
+    plt.title('Final Predicted Solution')
+    plt.xlabel('t')
+    plt.ylabel('x')
+    
+    plt.subplot(132)
+    plt.imshow(final_eval['u_exact'].T, aspect='auto', 
+              extent=[0, 1, 0, 2*np.pi], cmap='viridis')
+    plt.colorbar(label='u')
+    plt.title('Exact Solution')
+    plt.xlabel('t')
+    plt.ylabel('x')
+    
+    plt.subplot(133)
+    plt.imshow(torch.abs(final_eval['u_pred'] - final_eval['u_exact']).T, 
+              aspect='auto', extent=[0, 1, 0, 2*np.pi], cmap='magma')
+    plt.colorbar(label='|error|')
+    plt.title('Final Absolute Error')
+    plt.xlabel('t')
+    plt.ylabel('x')
+    
+    plt.tight_layout()
+    plt.show()
+
+    print(f"\nTraining completed in {time_elapsed:.2f} seconds")
+    print(f"Best L2 error: {min(history['l2_error']):.2e}")
+
+    return history
+
+
+# %%
+import torch
+import numpy as np
+from time import time
+
+# Set random seed for reproducibility
+torch.manual_seed(42)
+
+# Spectral model
+Ns = [81, 80]  # 21 (odd) Chebyshev points in time, 20 (even) Fourier points in space
+bases = ["chebyshev", "fourier"]  # Chebyshev in time, Fourier in space
+domains = [(0, 1), (0, 2*np.pi)]  # t ∈ [0,1], x ∈ [0,2π]
+spectral_model = SpectralInterpolationND(Ns, bases, domains)
+
+# MLP model
+mlp_model = MLP(n_dim=2, hidden_dim=64, activation=torch.tanh)
+
+# Train spectral model
+print("Training Spectral Model...")
+history_spectral = train_advection(
+    spectral_model,
+    n_epochs=1000,
+    lr=0.01,
+    ic_weight=10.0,
+    c=80,
+    plot_every=100,
+)
+
+# Train MLP model
+print("\nTraining MLP Model...")
+history_mlp = train_advection(
+    mlp_model,
+    n_epochs=1000,
+    lr=0.01,
+    ic_weight=10.0,
+    c=80,
+    plot_every=100
+)
+
+# Compare final L2 errors
+print("\nFinal Results:")
+print(f"Spectral Model - Best L2 error: {min(history_spectral['l2_error']):.2e}")
+print(f"MLP Model - Best L2 error: {min(history_mlp['l2_error']):.2e}")
+
+# Plot comparison of convergence
+plt.figure(figsize=(15, 5))
+
+plt.subplot(131)
+plt.semilogy(history_spectral['time'][1:], history_spectral['loss'], label='Spectral')
+plt.semilogy(history_mlp['time'][1:], history_mlp['loss'], label='MLP')
+plt.title('Loss vs Time')
+plt.xlabel('Time (s)')
+plt.ylabel('Loss')
+plt.legend()
+
+plt.subplot(132)
+plt.semilogy(history_spectral['time'][1:], history_spectral['l2_error'], label='Spectral')
+plt.semilogy(history_mlp['time'][1:], history_mlp['l2_error'], label='MLP')
+plt.title('L2 Error vs Time')
+plt.xlabel('Time (s)')
+plt.ylabel('L2 Error')
+plt.legend()
+
+plt.subplot(133)
+plt.semilogy(history_spectral['time'][1:], history_spectral['learning_rates'], label='Spectral')
+plt.semilogy(history_mlp['time'][1:], history_mlp['learning_rates'], label='MLP')
+plt.title('Learning Rate vs Time')
+plt.xlabel('Time (s)')
+plt.ylabel('Learning Rate')
+plt.legend()
+
+plt.tight_layout()
+plt.show()
+
+# %%
+import torch
+import numpy as np
+from time import time
+
+# Set random seed for reproducibility
+torch.manual_seed(42)
+
+# Spectral model
+Ns = [11, 80]  # 21 (odd) Chebyshev points in time, 20 (even) Fourier points in space
+bases = ["chebyshev", "fourier"]  # Chebyshev in time, Fourier in space
+domains = [(0, 1/100), (0, 2*np.pi)]  # t ∈ [0,1], x ∈ [0,2π]
+spectral_model = SpectralInterpolationND(Ns, bases, domains)
+
+# MLP model
+mlp_model = MLP(n_dim=2, hidden_dim=64, activation=torch.tanh)
+
+# Train spectral model
+print("Training Spectral Model...")
+history_spectral = train_advection(
+    spectral_model,
+    n_epochs=5000,
+    lr=1e-3,
+    ic_weight=100,
+    c=80,
+    plot_every=100,
+    t_max=1/100,
+    temporal_eps=0.1,
+)
+
+# %%
