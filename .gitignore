@@ -76,4 +76,5 @@ maildir
 
 # Jupyter Notebook
 notebooks/*.ipynb
+notebooks/**/*.ipynb
 etc/

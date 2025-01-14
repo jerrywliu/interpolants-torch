@@ -603,6 +603,14 @@ def compute_pde_loss(model, t_grid, x_grid, ic_x_grid=None, ic_weight=1.0, c=80,
     # PDE residual: u_t + c*u_x = 0
     pde_residual = u_t + c*u_x
     
+    pde_loss = torch.mean(pde_residual**2)
+    ic_residual = u_ic - torch.sin(ic_x_grid)
+    ic_loss = torch.mean(ic_residual**2)
+    total_loss = pde_loss + ic_loss * ic_weight
+    #print(f"total {total_loss}, pde {pde_loss}, ic {ic_loss}")
+    return total_loss, pde_residual, ic_residual
+    
+    
     # Compute per-timestep losses
     timestep_losses = torch.mean(pde_residual**2, dim=1)  # Mean over space
     
@@ -619,7 +627,7 @@ def compute_pde_loss(model, t_grid, x_grid, ic_x_grid=None, ic_weight=1.0, c=80,
     ic_residual = u_ic - torch.sin(ic_x_grid)
     ic_loss = torch.mean(ic_residual**2)
     
-    total_loss = pde_loss / ic_weight + ic_loss
+    total_loss = pde_loss + ic_loss * ic_weight
     
     # print(f"total {total_loss}, pde {pde_loss}, ic {ic_loss}")
     return total_loss, pde_residual, ic_residual
@@ -695,10 +703,12 @@ def get_training_grids(model=None, n_t=32, n_x=32, n_ic=32, t_max=1):
             torch.linspace(0, 2*np.pi, n_x//2),
             torch.rand(n_x//2)*2*np.pi,
         ])
-        ic_x_grid = torch.cat([
-            torch.linspace(0, 2*np.pi, n_ic//2),
-            torch.rand(n_ic//2)*2*np.pi,
-        ])
+        # ic_x_grid = torch.cat([
+        #     torch.linspace(0, 2*np.pi, n_ic//2),
+        #     torch.rand(n_ic//2)*2*np.pi,
+        # ])
+        ic_x_grid = x_grid
+        # print(f"t_grid {t_grid}, x_grid {x_grid}")
     if isinstance(model, SpectralInterpolationND):
         t_grid = model.nodes[0]
         x_grid = model.nodes[1]
@@ -778,13 +788,15 @@ def train_advection(model, n_epochs=1000, lr=1e-3, ic_weight=1.0, c=80, plot_eve
     # Get training and evaluation grids
     t_grid, x_grid, ic_x_grid = get_training_grids(
         None,
-        n_t=2*c+1,
-        n_x=2*c,
-        n_ic=2*c
+        n_t=101,
+        n_x=100,
+        n_ic=100
     )
     n_eval = 100
-    t_eval = torch.linspace(0, 1, n_eval)
-    x_eval = torch.linspace(0, 2*np.pi, n_eval)
+    #t_eval = torch.linspace(0, 1, n_eval)
+    #x_eval = torch.linspace(0, 2*np.pi, n_eval+1)[:-1]
+    t_eval = t_grid
+    x_eval = x_grid
     
     # Setup optimizer and scheduler
     optimizer = optim.Adam(model.parameters(), lr=lr)
@@ -871,9 +883,9 @@ def train_advection(model, n_epochs=1000, lr=1e-3, ic_weight=1.0, c=80, plot_eve
             plt.tight_layout()
             plt.show()
         
-        if early_stopping.early_stop:
-            print(f"\nEarly stopping triggered at epoch {epoch}")
-            break
+        # if early_stopping.early_stop:
+        #     print(f"\nEarly stopping triggered at epoch {epoch}")
+        #     break
     
     # Load best model
     model.load_state_dict(early_stopping.best_state)
@@ -940,6 +952,99 @@ def train_advection(model, n_epochs=1000, lr=1e-3, ic_weight=1.0, c=80, plot_eve
 
     return history
 
+
+# %%
+
+# %%
+import torch
+import numpy as np
+from time import time
+
+# Set random seed for reproducibility
+torch.manual_seed(42)
+
+# Spectral model
+Ns = [9, 8]  # 21 (odd) Chebyshev points in time, 20 (even) Fourier points in space
+bases = ["chebyshev", "fourier"]  # Chebyshev in time, Fourier in space
+domains = [(0, 1), (0, 2*np.pi)]  # t ∈ [0,1], x ∈ [0,2π]
+spectral_model = SpectralInterpolationND(Ns, bases, domains)
+
+# MLP model
+mlp_model = MLP(n_dim=2, hidden_dim=64, activation=torch.tanh)
+
+# Train both models
+print("Training Spectral Model...")
+history_spectral = train_advection(
+    spectral_model,
+    n_epochs=10000,
+    lr=0.01,
+    ic_weight=10.0,
+    c=8,
+    plot_every=100
+)
+
+print("\nTraining MLP Model...")
+history_mlp = train_advection(
+    mlp_model,
+    n_epochs=1000,
+    lr=0.01,
+    ic_weight=10.0,
+    c=8,
+    plot_every=100
+)
+
+# Compare final L2 errors
+print("\nFinal Results:")
+print(f"Spectral Model - Best L2 error: {min(history_spectral['l2_error']):.2e}")
+print(f"MLP Model - Best L2 error: {min(history_mlp['l2_error']):.2e}")
+
+# Plot comparison
+plt.figure(figsize=(15, 5))
+
+plt.subplot(131)
+plt.semilogy(range(len(history_spectral['loss'])), history_spectral['loss'], label='Spectral')
+plt.semilogy(range(len(history_mlp['loss'])), history_mlp['loss'], label='MLP')
+plt.title('Loss vs Epochs')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+
+plt.subplot(132)
+plt.semilogy(range(len(history_spectral['l2_error'])), history_spectral['l2_error'], label='Spectral')
+plt.semilogy(range(len(history_mlp['l2_error'])), history_mlp['l2_error'], label='MLP')
+plt.title('L2 Error vs Epochs')
+plt.xlabel('Epoch')
+plt.ylabel('L2 Error')
+plt.legend()
+
+plt.subplot(133)
+plt.semilogy(range(len(history_spectral['learning_rates'])), history_spectral['learning_rates'], label='Spectral')
+plt.semilogy(range(len(history_mlp['learning_rates'])), history_mlp['learning_rates'], label='MLP')
+plt.title('Learning Rate vs Epochs')
+plt.xlabel('Epoch')
+plt.ylabel('Learning Rate')
+plt.legend()
+
+plt.tight_layout()
+plt.show()
+
+# %%
+
+# %%
+
+# %%
+
+# %%
+
+# %%
+
+# %%
+
+# %%
+
+# %%
+
+# %%
 
 # %% [markdown]
 # ### Run the models

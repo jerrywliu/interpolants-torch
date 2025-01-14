@@ -3,13 +3,38 @@
 conda activate /pscratch/sd/j/jwl50/interpolants-torch/.env
 ```
 
-## Test data and model
+## Interpolation
+### Analytical targets:
 ```
-python -m src.models.nd_interpolant
+python -m src.experiments.interpolation.simple_fcns.abs_1d
+python -m src.experiments.interpolation.simple_fcns.sine_1d
+python -m src.experiments.interpolation.simple_fcns.sine_2d
+```
+### PDE solutions: TODO
+```
+python -m src.experiments.interpolation.pde_solns.adv_1d
+python -m src.experiments.interpolation.pde_solns.burgers_1d
+python -m src.experiments.interpolation.pde_solns.allen_cahn
+python -m src.experiments.interpolation.pde_solns.navier_stokes_2d
 ```
 
-## Train
+## ODEs: TODO
 ```
+```
+
+## Simple PDEs: TODO
+```
+adv_1d
+poisson_2d
+heat_2d
+wave_1d
+```
+
+## Benchmark PDEs: TODO
+```
+burgers_1d
+allen_cahn
+navier_stokes_2d
 ```
 
 TODO:
