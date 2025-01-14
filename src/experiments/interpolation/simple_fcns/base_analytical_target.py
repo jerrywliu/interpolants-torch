@@ -1,6 +1,5 @@
-from typing import Callable, List, Tuple
-
 import torch
+from typing import Callable, List, Tuple
 
 
 class BaseAnalyticalTarget:
@@ -20,27 +19,24 @@ class BaseAnalyticalTarget:
         # representing the lower and upper bounds of the domain for each dimension
         self.domain = domain
         self.n_dims = len(domain)
+        self.domain_lengths = [domain[i][1] - domain[i][0] for i in range(self.n_dims)]
         # Set up domain mapping functions for each dimension, for both chebyshev and fourier
         # Default domains are [-1, 1] for chebyshev and [0, 2*pi] for fourier
         self._to_cheb = (
-            lambda x, d: 2
-            * (x - self.domain[d][0])
-            / (self.domain[d][1] - self.domain[d][0])
-            - 1
+            lambda x, d: 2 * (x - self.domain[d][0]) / (self.domain_lengths[d]) - 1
         )
         self._from_cheb = (
-            lambda x, d: self.domain[d][0]
-            + (x + 1) * (self.domain[d][1] - self.domain[d][0]) / 2
+            lambda x, d: self.domain[d][0] + (x + 1) * (self.domain_lengths[d]) / 2
         )
         self._to_fourier = (
             lambda x, d: 2
             * torch.pi
             * (x - self.domain[d][0])
-            / (self.domain[d][1] - self.domain[d][0])
+            / (self.domain_lengths[d])
         )
         self._from_fourier = (
             lambda x, d: self.domain[d][0]
-            + x * (self.domain[d][1] - self.domain[d][0]) / 2 / torch.pi
+            + (x / (2 * torch.pi)) * self.domain_lengths[d]
         )
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
@@ -54,6 +50,9 @@ class BaseAnalyticalTarget:
 
     def get_domain(self, dim: int) -> Tuple[float, float]:
         return self.domain[dim]
+
+    def get_domain_lengths(self) -> List[float]:
+        return self.domain_lengths
 
     def get_n_dims(self) -> int:
         return self.n_dims

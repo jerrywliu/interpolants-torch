@@ -550,6 +550,9 @@ class MLP(nn.Module):
 #
 # Note that we use periodic boundary conditions in x since displacement of a sine wave should be periodic.
 
+# %% [markdown]
+#
+
 # %%
 def compute_pde_loss(model, t_grid, x_grid, ic_x_grid=None, ic_weight=1.0, c=80, **kwargs):
     """
@@ -960,7 +963,7 @@ def train_advection_pde(model, n_epochs=1000, lr=1e-3, ic_weight=1.0, c=80, plot
     Train model to solve the advection equation using clean training framework
     """
     # Setup training grid
-    t_grid, x_grid, ic_x_grid = get_training_grids(None, n_t=2*c+1, n_x=2*c, n_ic=2*c)
+    t_grid, x_grid, ic_x_grid = get_training_grids(None, n_t=4*c+1, n_x=4*c, n_ic=4*c)
     
     # Setup evaluation grid (finer)
     n_eval = 200
@@ -972,7 +975,7 @@ def train_advection_pde(model, n_epochs=1000, lr=1e-3, ic_weight=1.0, c=80, plot
     # Setup optimizer
     optimizer = optim.Adam(model.parameters(), lr=lr)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=50, verbose=True, min_lr=1e-6
+        optimizer, mode='min', factor=0.5, patience=50, verbose=True, min_lr=1e-3
     )
     early_stopping = EarlyStopping(patience=150, min_delta=1e-20)
     
@@ -1123,7 +1126,7 @@ def train_advection_pde(model, n_epochs=1000, lr=1e-3, ic_weight=1.0, c=80, plot
 # %%
 c = 8
 model = SpectralInterpolationND(
-    Ns=[c+1, c],
+    Ns=[2*c+1, 2*c],
     bases=['chebyshev', 'fourier'],
     domains=[[0, 1], [0, 2*np.pi]]
 )
@@ -1131,26 +1134,17 @@ model = SpectralInterpolationND(
 history = train_advection_pde(
     model,
     n_epochs=10000,
-    lr=1e-2,
+    lr=1e-3,
     ic_weight=1.0,
     c=c,
     plot_every=50,
 )
 
-# %%
-history = train_advection_pde(
-    model,
-    n_epochs=10000,
-    lr=1e-2,
-    ic_weight=0.01,
-    c=c,
-    plot_every=50,
-)
-
 
 # %%
 
-# %%
+# %% [markdown]
+# # Hacking below
 
 # %%
 def train_one_epoch(model, optimizer, t_grid, x_grid, ic_x_grid, ic_weight=1.0, c=80, temporal_eps=0):

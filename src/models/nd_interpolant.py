@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 
 
+# TODO JL 1/14/2025: add function to get entries corresponding to IC
 class SpectralInterpolationND(nn.Module):
     def __init__(self, Ns, bases, domains):
         """
@@ -220,41 +221,90 @@ class SpectralInterpolationND(nn.Module):
         # values: (1, B2, B, N)
         # nodes: (1, 1, 1, N)
         # weights: (1, 1, 1, N)
-        # x_eval_expanded = x_eval_standard[:, None, :, None]  # (B1, 1, B, 1)
-        # values_expanded = values[None, ...]  # (1, B2, B, N)
-        # nodes_expanded = nodes_std[None, None, None, :]  # (1, 1, 1, N)
-        # weights_expanded = weights[None, None, None, :]  # (1, 1, 1, N)
 
-        x_eval_expanded, nodes_expanded, values_expanded, weights_expanded = (
-            torch.broadcast_tensors(
-                x_eval_standard[:, None, :, None],
-                nodes_std[None, None, None, :],
-                values[None, ...],
-                weights[None, None, None, :],
-            )
-        )
+        # # Implementation 1
+        # time_start = time()
+        x_eval_expanded = x_eval_standard.unsqueeze(1).unsqueeze(-1)  # (B1, 1, B, 1)
+        values_expanded = values.unsqueeze(0)  # (1, B2, B, N)
+        nodes_expanded = nodes_std.reshape(1, 1, 1, -1)
+        weights_expanded = weights.reshape(1, 1, 1, -1)
+        # print(f"Version 1: {time() - time_start}")
 
-        # Compute distances
-        d_x = x_eval_expanded - nodes_expanded  # (B1, B2, B, N)
+        # # Implementation 2
+        # time_start = time()
+        # x_eval_expanded, nodes_expanded, values_expanded, weights_expanded = torch.broadcast_tensors(
+        #     x_eval_standard[:, None, :, None], nodes_std[None, None, None, :], values[None, ...], weights[None, None, None, :]
+        # )
+        # print(f"Version 2: {time() - time_start}")
+
+        # Compute distances - result is (B1, B2, B, N)
+        d_x = x_eval_expanded - nodes_expanded
 
         small_diff = torch.abs(d_x) < eps
         small_diff_max = torch.max(small_diff, dim=-1, keepdim=True).values
 
-        # d_x = torch.where(small_diff_max, torch.zeros_like(d_x), 1.0 / d_x)
-
-        d_x_reciprocal = torch.zeros_like(d_x)
-        d_x_reciprocal[~small_diff] = 1.0 / d_x[~small_diff]
-        d_x = torch.where(small_diff_max, torch.zeros_like(d_x), d_x_reciprocal)
-
+        d_x = torch.where(small_diff_max, torch.zeros_like(d_x), 1.0 / d_x)
         d_x[small_diff] = 1
 
         # Compute weighted sum along last axis
+        # # Implementation 1
         f_eval_num = torch.sum(
             values_expanded * d_x * weights_expanded, dim=-1
         )  # (B1, B2, B)
         f_eval_denom = torch.sum(d_x * weights_expanded, dim=-1)  # (B1, B2, B)
 
-        return f_eval_num / f_eval_denom  # (B1, B2, B)
+        # # Implementation 2
+        # f_eval_num = torch.einsum('...ij,...ij->...i', values_expanded * weights_expanded, d_x)  # (B1, B2, B)
+        # f_eval_denom = torch.einsum('...ij,...ij->...i', weights_expanded, d_x)  # (B1, B2, B)
+
+        return f_eval_num / f_eval_denom
+
+    def _cheb_interpolate_1ofnd(
+        self, values, x_eval, dim, nodes_std, to_std, weights, eps=1e-14
+    ):
+        """
+        Interpolate along a specific Chebyshev dimension of a tensor.
+
+        Args:
+            values: Tensor of shape (..., N, ...), where N is the size of the Chebyshev dim.
+            x_eval: Tensor of shape (m,), points to evaluate along the Chebyshev dimension.
+            dim: Integer, the axis corresponding to the Chebyshev dimension in `values`.
+            nodes_std: Tensor of shape (N,), the Chebyshev nodes.
+            to_std: Function mapping physical to standard domain.
+            weights: Tensor of shape (N,), the barycentric weights.
+            eps: Small value to handle division by zero.
+
+        Returns:
+            Tensor of shape (..., m, ...), with the Chebyshev dimension replaced by interpolated values.
+        """
+
+        # Step 1: Move the Chebyshev axis to the last position for simplicity
+        values_moved = values.movedim(dim, -1)  # (..., N)
+        batch_shape, N = values_moved.shape[:-1], values_moved.shape[-1]
+        m = x_eval.shape[0]  # Number of evaluation points
+
+        # Step 2: Reshape for batch broadcasting
+        # - Add a singleton dimension to `values` for x_eval
+        # - Add a singleton dimension to `x_eval` for values
+        values_reshaped = values_moved.reshape(-1, 1, N)  # (..., None, N)
+        x_eval_reshaped = x_eval[:, None]  # (m, 1)
+
+        # Step 3: Call the 1D Chebyshev interpolation helper
+        interpolated = self._cheb_interpolate_1d(
+            x_eval=x_eval_reshaped,  # Shape (m, 1)
+            values=values_reshaped,  # Shape (..., None, N)
+            nodes_std=nodes_std,  # Shape (N,)
+            to_std=to_std,  # Function
+            weights=weights,  # Shape (N,)
+            eps=eps,
+        )  # Output shape: (..., m, 1)
+
+        # Step 4: Restore the original dimension layout
+        interpolated = interpolated.reshape(m, *batch_shape).movedim(
+            0, dim
+        )  # (..., m, ...)
+
+        return interpolated
 
     def _fourier_interpolate_1d(self, x_eval, values, to_std, k):
         """Helper for 1D Fourier interpolation along last axis
@@ -290,124 +340,85 @@ class SpectralInterpolationND(nn.Module):
         result = torch.sum(fourier_matrix * coeffs_expanded, dim=-1)
         return torch.real(result) / N
 
-    def interpolate(self, x_eval, values):
+    def _fourier_interpolate_1ofnd(self, values, x_eval, dim, to_std, k):
         """
-        Interpolate values at arbitrary points x_eval
+        Interpolate along a specific Fourier dimension of a tensor.
 
         Args:
-            x_eval: Tensor of shape (..., n_dim) containing coordinates to evaluate at
-            values: Tensor of shape (*batch, *grid_dims) containing values to interpolate
+            values: Tensor of shape (..., N, ...), where N is the size of the Fourier dim.
+            x_eval: Tensor of shape (m,), points to evaluate along the Fourier dimension.
+            dim: Integer, the axis corresponding to the Fourier dimension in `values`.
+            to_std: Function mapping physical to standard domain.
+            k: Tensor of shape (N,), the Fourier frequencies.
 
         Returns:
-            Tensor of shape (..., *batch) containing interpolated values
+            Tensor of shape (..., m, ...), with the Fourier dimension replaced by interpolated values.
         """
-        # Ensure input has correct shape
-        assert (
-            x_eval.shape[-1] == self.n_dim
-        ), f"Expected {self.n_dim} coordinates, got {x_eval.shape[-1]}"
 
-        # Store original batch shapes
-        x_eval_batch_shape = x_eval.shape[:-1]  # (...) from (..., n_dim)
-        x_eval_batch_shape_prod = int(
-            torch.prod(torch.tensor(x_eval_batch_shape)).item()
+        # Step 1: Move the Fourier axis to the last position for simplicity
+        values_moved = values.movedim(dim, -1)
+        batch_shape, N = values_moved.shape[:-1], values_moved.shape[-1]
+        m = x_eval.shape[0]  # Number of evaluation points
+
+        # Step 2: Reshape for batch broadcasting
+        # - Add a singleton dimension to `values` for x_eval
+        # - Add a singleton dimension to `x_eval` for values
+        values_reshaped = values_moved.reshape(-1, 1, N)
+        x_eval_reshaped = x_eval[:, None]
+
+        # Step 3: Call the 1D Fourier interpolation helper
+        interpolated = self._fourier_interpolate_1d(
+            x_eval=x_eval_reshaped,  # Shape (m, 1)
+            values=values_reshaped,  # Shape (..., None, N)
+            to_std=to_std,  # Function
+            k=k,  # Shape (..., N, 1)
         )
-        values_batch_shape = values.shape[
-            : -self.n_dim
-        ]  # (*batch) from (*batch, *grid_dims)
-        values_batch_shape_prod = int(
-            torch.prod(torch.tensor(values_batch_shape)).item()
-        )
 
-        # Reshape x_eval to (B1, B) = (prod(x_eval_batch_shape), n_dim)
-        x_eval_reshaped = x_eval.reshape(-1, self.n_dim)
+        # Step 4: Restore the original dimension layout
+        interpolated = interpolated.reshape(m, *batch_shape).movedim(0, dim)
 
-        # Reshape values to (B2, ...) = (prod(values_batch_shape), grid_dims)
-        result = values.clone().reshape(-1, *values.shape[-self.n_dim :])
+        return interpolated
 
-        # Interpolate one dimension at a time
+    def interpolate(self, x_eval, values=None):
+        """
+        Interpolate the function at the given points
+
+        Args:
+            x_eval: List of tensors of shapes (m1,), (m2,), ..., (m_ndim,) - points to evaluate at
+
+        Returns:
+            Tensor of shape (m1, m2, ..., m_ndim) - interpolated values
+        """
+        if values is not None:
+            assert values.shape == self.values.shape
+            interpolated = values
+        else:
+            interpolated = self.values
         for dim in range(self.n_dim):
-
-            # Get current dimension's coordinates, with shape (prod(x_eval_batch_shape))
-            coords = x_eval_reshaped[..., dim]
-            if dim == 0:
-                # If first dimension, reshape to (B1, B) = (prod(x_eval_batch_shape), 1)
-                coords_reshaped = coords.unsqueeze(-1)
-            else:
-                # Else, reshape to (B1, B) = (1, prod(x_eval_batch_shape))
-                coords_reshaped = coords.unsqueeze(0)
-
-            # Move result's target dimension to the end of grid dimensions
-            shape = result.shape
-            grid_dims = shape[
-                -self.n_dim + dim :
-            ]  # This gets smaller every iter of the loop, so that the next dim to interpolate over is always grid_dims[0]
-            grid_dims_minus_current = grid_dims[1:]
-            batch_dims = shape[: -self.n_dim + dim]
-
-            # Permute grid dimensions to put target dim last
-            perm = list(range(len(shape)))
-            grid_start = len(batch_dims)
-            perm.append(perm.pop(grid_start))
-            result = result.permute(perm)
-
-            # If dim > 0, assume that the last batch dimension is the shared dimension, move it to second last
-            if dim > 0:
-                perm = list(range(len(result.shape)))
-                x_eval_dim = len(batch_dims) - 1
-                perm.insert(
-                    -1, perm.pop(x_eval_dim)
-                )  # Move last dim to second-to-last position
-                result = result.permute(perm)
-
-            if dim == 0:
-                # If first dimension, reshape to (B2, B, N) = (prod(batch_dims + grid_dims[1:]), 1, grid_dims[0])
-                result = result.reshape(-1, 1, grid_dims[0])
-            else:
-                # Else, result is already extended by B1 = prod(x_eval_batch_shape). Reshape to (B2, B, N) = (prod(batch_dims + grid_dims[:] - grid_dims[dim]), prod(x_eval_batch_shape), grid_dims[dim])
-                result = result.reshape(-1, x_eval_batch_shape_prod, grid_dims[0])
-
-            # Apply 1D interpolation
             if self.bases[dim] == "chebyshev":
-                result = self._cheb_interpolate_1d(
-                    coords_reshaped,
-                    result,
-                    self.nodes_standard[dim],
-                    self._to_standard[dim],
-                    self.cheb_weights[dim],
+                interpolated = self._cheb_interpolate_1ofnd(
+                    values=interpolated,
+                    x_eval=x_eval[dim],
+                    dim=dim,
+                    nodes_std=self.nodes_standard[dim],
+                    to_std=self._to_standard[dim],
+                    weights=self.cheb_weights[dim],
                 )
-            else:  # fourier
-                result = self._fourier_interpolate_1d(
-                    coords_reshaped, result, self._to_standard[dim], self.k[dim]
+            elif self.bases[dim] == "fourier":
+                interpolated = self._fourier_interpolate_1ofnd(
+                    values=interpolated,
+                    x_eval=x_eval[dim],
+                    dim=dim,
+                    to_std=self._to_standard[dim],
+                    k=self.k[dim],
                 )
-
-            # Result is now (B1, B2, B)
-            # = (prod(x_eval_batch_shape), prod(batch_dims + grid_dims[1:]), 1) if dim == 0
-            # = (1, prod(batch_dims + grid_dims[:] - grid_dims[dim]), prod(x_eval_batch_shape)) if dim > 0
-
-            # Reshape result to restore batch dimensions
-            # Then permute result to restore batch dimensions: (batch_dims, x_eval_batch_shape_prod, grid_dims_minus_current)
-            if dim == 0:
-                # (prod(x_eval_batch_shape), batch_dims, grid_dims[1:])
-                result = result.reshape(-1, *batch_dims, *grid_dims_minus_current)
-                x_eval_dim = 0
-                target_pos = len(batch_dims)
             else:
-                # (batch_dims, grid_dims-grid_dims[dim], prod(x_eval_batch_shape))
-                result = result.reshape(
-                    *batch_dims[:-1], *grid_dims_minus_current, x_eval_batch_shape_prod
-                )
-                x_eval_dim = -1
-                target_pos = len(batch_dims) - 1
+                raise ValueError(f"Unknown basis: {self.bases[dim]}")
 
-            # Move x_eval batch dim after other batch dims
-            perm = list(range(len(result.shape)))
-            perm.insert(target_pos, perm.pop(x_eval_dim))
-            result = result.permute(perm)
-
-        return result
+        return interpolated
 
     def forward(self, x_eval):
-        return self.interpolate(x_eval, self.values)
+        return self.interpolate(x_eval, values=self.values)
 
     def _derivative_interpolant(self, k):
         """
@@ -457,49 +468,8 @@ class SpectralInterpolationND(nn.Module):
         Returns:
             Tensor of shape (...) containing derivative values at x_eval points
         """
-        # Compute derivative values at grid points
+        # Compute derivative at nodes
         dk_nodes = self._derivative_interpolant(k)
 
         # Interpolate to evaluation points
-        return self.interpolate(x_eval, dk_nodes)
-
-
-# Test the ND interpolant
-if __name__ == "__main__":
-
-    torch.set_default_dtype(torch.float64)
-
-    # Define a smooth 3D test function
-    def test_function_3d(x, y, z):
-        return (
-            torch.sin(2 * torch.pi * x) * torch.cos(torch.pi * y) * torch.exp(-(z**2))
-        )
-
-    interp = SpectralInterpolationND(
-        Ns=[32, 33, 35],  # Different numbers to catch any indexing issues
-        bases=["fourier", "chebyshev", "chebyshev"],
-        domains=[(0, 1), (-1, 1), (-1, 1)],
-    )
-
-    # Set values at grid points
-    x_grid, y_grid, z_grid = interp.mesh
-    interp.values.data = test_function_3d(x_grid, y_grid, z_grid)
-    print(f"self.values: {interp.values.shape}")
-
-    # Test random points
-    n_test = 10000
-    test_points = torch.rand(n_test, 3)
-    test_points[:, 0] = 2 * test_points[:, 0] - 1  # x in [0,1]
-    test_points[:, 1] = 2 * test_points[:, 1] - 1  # y in [-1,1]
-    test_points[:, 2] = 2 * test_points[:, 2] - 1  # z in [-1,1]
-
-    interpolated_random = interp(test_points)
-    exact_random = test_function_3d(
-        test_points[:, 0], test_points[:, 1], test_points[:, 2]
-    )
-    error_random = torch.abs(interpolated_random - exact_random)
-
-    print("\nRandom points test:")
-    print(f"Maximum absolute error: {error_random.max().item():.2e}")
-    print(f"Average absolute error: {error_random.mean().item():.2e}")
-    print(f"RMS error: {torch.sqrt((error_random**2).mean()).item():.2e}")
+        return self.interpolate(x_eval, values=dk_nodes)

@@ -2,6 +2,7 @@
 *tmp
 *.out
 *.ipynb_checkpoints
+plots/**/*.png
 
 # Environments
 .env
