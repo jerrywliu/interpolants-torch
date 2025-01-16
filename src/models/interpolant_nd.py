@@ -1,10 +1,13 @@
 import torch
 import torch.nn as nn
+from typing import List, Tuple, Callable
 
 
 # TODO JL 1/14/2025: add function to get entries corresponding to IC
 class SpectralInterpolationND(nn.Module):
-    def __init__(self, Ns, bases, domains):
+    def __init__(
+        self, Ns: List[int], bases: List[str], domains: List[Tuple[float, float]]
+    ):
         """
         ND interpolation using spectral methods
 
@@ -90,7 +93,9 @@ class SpectralInterpolationND(nn.Module):
         # Learnable values at node points
         self.values = nn.Parameter(torch.zeros(self.Ns))
 
-    def _compute_cheb_derivative_matrix(self, nodes, domain_length):
+    def _compute_cheb_derivative_matrix(
+        self, nodes: torch.Tensor, domain_length: float
+    ) -> torch.Tensor:
         """
         Compute the differentiation matrix for 1D Chebyshev points
         """
@@ -116,7 +121,9 @@ class SpectralInterpolationND(nn.Module):
 
         return D
 
-    def _compute_fourier_derivative_matrix(self, nodes, domain_length):
+    def _compute_fourier_derivative_matrix(
+        self, nodes: torch.Tensor, domain_length: float
+    ) -> torch.Tensor:
         """
         Compute the differentiation matrix for 1D equispaced Fourier
         """
@@ -143,7 +150,7 @@ class SpectralInterpolationND(nn.Module):
 
         return D
 
-    def derivative_matrix(self, k):
+    def derivative_matrix(self, k: Tuple[int, ...]) -> torch.Tensor:
         """
         Get mixed derivative matrix D^k where k is a tuple of derivative orders
 
@@ -200,7 +207,13 @@ class SpectralInterpolationND(nn.Module):
         return D
 
     def _cheb_interpolate_1d(
-        self, x_eval, values, nodes_std, to_std, weights, eps=1e-14
+        self,
+        x_eval: torch.Tensor,
+        values: torch.Tensor,
+        nodes_std: torch.Tensor,
+        to_std: Callable,
+        weights: torch.Tensor,
+        eps: float = 1e-14,
     ):
         """Helper for 1D Chebyshev interpolation along last axis
 
@@ -260,7 +273,14 @@ class SpectralInterpolationND(nn.Module):
         return f_eval_num / f_eval_denom
 
     def _cheb_interpolate_1ofnd(
-        self, values, x_eval, dim, nodes_std, to_std, weights, eps=1e-14
+        self,
+        values: torch.Tensor,
+        x_eval: torch.Tensor,
+        dim: int,
+        nodes_std: torch.Tensor,
+        to_std: Callable,
+        weights: torch.Tensor,
+        eps: float = 1e-14,
     ):
         """
         Interpolate along a specific Chebyshev dimension of a tensor.
@@ -306,7 +326,13 @@ class SpectralInterpolationND(nn.Module):
 
         return interpolated
 
-    def _fourier_interpolate_1d(self, x_eval, values, to_std, k):
+    def _fourier_interpolate_1d(
+        self,
+        x_eval: torch.Tensor,
+        values: torch.Tensor,
+        to_std: Callable,
+        k: torch.Tensor,
+    ) -> torch.Tensor:
         """Helper for 1D Fourier interpolation along last axis
 
         Args:
@@ -340,7 +366,14 @@ class SpectralInterpolationND(nn.Module):
         result = torch.sum(fourier_matrix * coeffs_expanded, dim=-1)
         return torch.real(result) / N
 
-    def _fourier_interpolate_1ofnd(self, values, x_eval, dim, to_std, k):
+    def _fourier_interpolate_1ofnd(
+        self,
+        values: torch.Tensor,
+        x_eval: torch.Tensor,
+        dim: int,
+        to_std: Callable,
+        k: torch.Tensor,
+    ) -> torch.Tensor:
         """
         Interpolate along a specific Fourier dimension of a tensor.
 
@@ -379,7 +412,7 @@ class SpectralInterpolationND(nn.Module):
 
         return interpolated
 
-    def interpolate(self, x_eval, values=None):
+    def interpolate(self, x_eval: List[torch.Tensor], values=None) -> torch.Tensor:
         """
         Interpolate the function at the given points
 
@@ -417,10 +450,19 @@ class SpectralInterpolationND(nn.Module):
 
         return interpolated
 
-    def forward(self, x_eval):
+    def forward(self, x_eval: List[torch.Tensor]) -> torch.Tensor:
+        """
+        Evaluate the interpolant at arbitrary evaluation points
+
+        Args:
+            x_eval: List of tensors of shapes (m1,), (m2,), ..., (m_ndim,) - points to evaluate at
+
+        Returns:
+            Tensor of shape (m1, m2, ..., m_ndim) - interpolated values
+        """
         return self.interpolate(x_eval, values=self.values)
 
-    def _derivative_interpolant(self, k):
+    def _derivative_interpolant(self, k: Tuple[int, ...]) -> torch.Tensor:
         """
         Compute mixed derivative of interpolant
 
@@ -456,17 +498,19 @@ class SpectralInterpolationND(nn.Module):
 
         return dk_nodes
 
-    def derivative(self, x_eval, k):
+    def derivative(
+        self, x_eval: List[torch.Tensor], k: Tuple[int, ...]
+    ) -> torch.Tensor:
         """
         Compute mixed derivative of interpolant at arbitrary evaluation points
 
         Args:
-            x_eval: Tensor of shape (..., n_dim) containing coordinates to evaluate at
+            x_eval: List of tensors of shapes (m1,), (m2,), ..., (m_ndim,) - points to evaluate at
             k: Tuple of length n_dim specifying derivative order in each dimension
                e.g., (2,0,1) means second derivative in x, none in y, first in z
 
         Returns:
-            Tensor of shape (...) containing derivative values at x_eval points
+            Tensor of shape (m1, m2, ..., m_ndim) - interpolated values
         """
         # Compute derivative at nodes
         dk_nodes = self._derivative_interpolant(k)

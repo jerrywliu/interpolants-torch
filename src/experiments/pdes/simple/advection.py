@@ -6,7 +6,7 @@ import torch.nn as nn
 from tqdm import tqdm
 from typing import List, Callable
 from src.experiments.pdes.base_pde import BasePDE
-from src.models.nd_interpolant import SpectralInterpolationND
+from models.interpolant_nd import SpectralInterpolationND
 
 """
 1D Advection equation:
@@ -247,7 +247,7 @@ if __name__ == "__main__":
     t_final = 1
     u_0 = lambda x: torch.sin(x)
     pde = Advection(c=c, t_final=t_final, u_0=u_0)
-    save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/advection"
+    save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/advection"
 
     # Model setup
     n_t = 2 * c + 1

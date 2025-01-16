@@ -42,6 +42,9 @@ class BaseAnalyticalTarget:
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         return self.f(x)
 
+    def get_function(self, x: torch.Tensor) -> torch.Tensor:
+        return self.f(x)
+
     def get_derivative(self, x: torch.Tensor) -> torch.Tensor:
         return self.derivative(x)
 

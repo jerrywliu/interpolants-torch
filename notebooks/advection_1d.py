@@ -16,6 +16,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+
 torch.set_default_dtype(torch.float64)
 import numpy as np
 
@@ -25,11 +26,12 @@ import matplotlib.pyplot as plt
 
 # %%
 import os, sys
+
 BASE_DIR = "/scratch/interpolants-torch"
 sys.path.append(BASE_DIR)
 
 # %%
-from src.models.nd_interpolant import SpectralInterpolationND
+from models.interpolant_nd import SpectralInterpolationND
 from src.experiments.pdes.simple.advection import Advection
 
 # %% [markdown]
@@ -46,8 +48,8 @@ save_dir = os.path.join(BASE_DIR, "plots/advection")
 # Model setup
 # n_t = 2 * c + 1
 # n_x = 2 * c
-n_t = 4*c+1
-n_x = 4*c
+n_t = 4 * c + 1
+n_x = 4 * c
 bases = ["chebyshev", "fourier"]
 model = SpectralInterpolationND(
     Ns=[n_t, n_x],
@@ -77,18 +79,19 @@ x_eval = torch.linspace(0, 2 * torch.pi, n_eval + 1)[:-1]
 # %%
 import torch
 
+
 def test_spectral_autograd(model):
     """Test if autograd can compute derivatives through spectral interpolation."""
-    
+
     # Get model nodes
     t_nodes, x_nodes = model.nodes
-    
+
     # Create evaluation points that require gradients
     eval_points = [t_nodes, x_nodes]
-    
+
     # Get interpolated values
     u = model.interpolate(eval_points)
-    
+
     # Try to compute derivative with autograd
     try:
         # Sum to get scalar for backward pass
@@ -103,28 +106,29 @@ def test_spectral_autograd(model):
         print(f"Error: {str(e)}")
         return False, None
 
+
 def compare_derivatives(model):
     """Compare autograd derivatives with spectral derivatives."""
-    
+
     t_nodes, x_nodes = model.nodes
-    
+
     # Get interpolated values with gradient tracking
     u = model.interpolate([t_nodes, x_nodes])
     loss = u.sum()
-    
+
     # Compute x-derivative using autograd
     try:
         grad_values = torch.autograd.grad(loss, model.values, create_graph=True)[0]
         print("Successfully got gradient w.r.t values!")
-        
+
         # Now try to get derivative w.r.t x through interpolation
         u = model.interpolate([t_nodes, x_nodes])
         u_x_spectral = model.derivative([t_nodes, x_nodes], k=(0, 1))
-        
+
         # Compare with spectral derivative
         print(f"\nSpectral derivative shape: {u_x_spectral.shape}")
         print(f"Max spectral derivative value: {u_x_spectral.abs().max():.2e}")
-        
+
         return True, u_x_spectral, grad_values
     except Exception as e:
         print(f"Error in comparison: {str(e)}")
@@ -132,10 +136,12 @@ def compare_derivatives(model):
 
 
 # %%
-def plot_derivative_comparison(u_x_spectral, u_x_autograd, t_grid, x_grid, save_path=None):
+def plot_derivative_comparison(
+    u_x_spectral, u_x_autograd, t_grid, x_grid, save_path=None
+):
     """
     Plot comparison between spectral and autograd derivatives.
-    
+
     Args:
         u_x_spectral: Derivative computed using spectral method
         u_x_autograd: Derivative computed using autograd
@@ -144,92 +150,103 @@ def plot_derivative_comparison(u_x_spectral, u_x_autograd, t_grid, x_grid, save_
         save_path: Optional path to save the figure
     """
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 4))
-    
+
     # Plot spectral derivatives
     im1 = ax1.imshow(
         u_x_spectral.detach(),
-        extent=[x_grid[0].item(), x_grid[-1].item(), 
-                t_grid[0].item(), t_grid[-1].item()],
-        origin='lower',
-        aspect='auto'
+        extent=[
+            x_grid[0].item(),
+            x_grid[-1].item(),
+            t_grid[0].item(),
+            t_grid[-1].item(),
+        ],
+        origin="lower",
+        aspect="auto",
     )
     plt.colorbar(im1, ax=ax1)
-    ax1.set_title('Spectral Derivative')
-    ax1.set_xlabel('x')
-    ax1.set_ylabel('t')
-    
+    ax1.set_title("Spectral Derivative")
+    ax1.set_xlabel("x")
+    ax1.set_ylabel("t")
+
     # Plot autograd derivatives
     im2 = ax2.imshow(
         u_x_autograd.detach(),
-        extent=[x_grid[0].item(), x_grid[-1].item(), 
-                t_grid[0].item(), t_grid[-1].item()],
-        origin='lower',
-        aspect='auto'
+        extent=[
+            x_grid[0].item(),
+            x_grid[-1].item(),
+            t_grid[0].item(),
+            t_grid[-1].item(),
+        ],
+        origin="lower",
+        aspect="auto",
     )
     plt.colorbar(im2, ax=ax2)
-    ax2.set_title('Autograd Derivative')
-    ax2.set_xlabel('x')
-    ax2.set_ylabel('t')
-    
+    ax2.set_title("Autograd Derivative")
+    ax2.set_xlabel("x")
+    ax2.set_ylabel("t")
+
     # Plot error on log scale
     error = torch.abs(u_x_spectral - u_x_autograd)
     im3 = ax3.imshow(
         error.detach(),
-        extent=[x_grid[0].item(), x_grid[-1].item(), 
-                t_grid[0].item(), t_grid[-1].item()],
-        origin='lower',
-        aspect='auto',
-        norm='log'
+        extent=[
+            x_grid[0].item(),
+            x_grid[-1].item(),
+            t_grid[0].item(),
+            t_grid[-1].item(),
+        ],
+        origin="lower",
+        aspect="auto",
+        norm="log",
     )
     plt.colorbar(im3, ax=ax3)
-    ax3.set_title('Log Error')
-    ax3.set_xlabel('x')
-    ax3.set_ylabel('t')
-    
+    ax3.set_title("Log Error")
+    ax3.set_xlabel("x")
+    ax3.set_ylabel("t")
+
     plt.tight_layout()
-    
+
     if save_path is not None:
         plt.savefig(save_path)
         plt.close()
     else:
         plt.show()
 
+
 def test_and_plot_derivatives(model, save_path=None):
     """
     Test derivatives and create visualization.
-    
+
     Args:
         model: SpectralInterpolationND model
         save_path: Optional path to save the figure
     """
     t_nodes, x_nodes = model.nodes
-    
+
     # Get interpolated values
     u = model.interpolate([t_nodes, x_nodes])
-    
+
     # Compute spectral derivative
     u_x_spectral = model.derivative([t_nodes, x_nodes], k=(0, 1))
-    
+
     # Compute autograd derivative through interpolation
     loss = u.sum()
     grad_values = torch.autograd.grad(loss, model.values, create_graph=True)[0]
-    
+
     # Plot comparison
     plot_derivative_comparison(u_x_spectral, grad_values, t_nodes, x_nodes, save_path)
-    
+
     # Print error metrics
     error = torch.abs(u_x_spectral - grad_values)
     print(f"Maximum error: {error.max().item():.2e}")
     print(f"Mean error: {error.mean().item():.2e}")
     print(f"Error std: {error.std().item():.2e}")
-    
+
     return u_x_spectral, grad_values, error
 
 
 model = SpectralInterpolationND(
-    Ns=[33, 32],
-    bases=["chebyshev", "fourier"],
-    domains=[(0, 1), (0, 2*torch.pi)]
+    Ns=[33, 32], bases=["chebyshev", "fourier"], domains=[(0, 1), (0, 2 * torch.pi)]
 )
 
 # Initialize with test function (e.g., sin(x))
