@@ -2,7 +2,7 @@ import torch
 import matplotlib.pyplot as plt
 import os
 from typing import Callable
-from experiments.interpolation.simple_fcns.base_analytical_target import (
+from src.experiments.interpolation.simple_fcns.base_analytical_target import (
     BaseAnalyticalTarget,
 )
 

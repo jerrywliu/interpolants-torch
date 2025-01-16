@@ -5,11 +5,11 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.15.2
+#       jupytext_version: 1.16.6
 #   kernelspec:
-#     display_name: icon
+#     display_name: interpolants
 #     language: python
-#     name: icon
+#     name: interpolants
 # ---
 
 # %%

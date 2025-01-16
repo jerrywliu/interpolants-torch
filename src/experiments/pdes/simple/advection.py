@@ -91,12 +91,12 @@ class Advection(BasePDE):
         L = D_t + self.c * D_x
 
         # Initial condition: extract t=0 values
-        IC = torch.zeros(n_x, n_t * n_x)
+        IC = torch.zeros(n_x, n_t * n_x).to(dtype=model.values.dtype)
         for i in range(n_x):
             IC[i, n_x * (n_t - 1) + i] = 1  # Set t=0 value to 1 for each x
 
         # Right hand side
-        b = torch.zeros(n_t * n_x + n_x)
+        b = torch.zeros(n_t * n_x + n_x, dtype=model.values.dtype)
         b[n_t * n_x :] = self.u_0(model.nodes[1])
 
         # Full system
@@ -106,8 +106,10 @@ class Advection(BasePDE):
     def fit_least_squares(self, model: SpectralInterpolationND):
         A, b = self.get_least_squares(model)
         u = torch.linalg.lstsq(A, b).solution
-        u = u.reshape(model.nodes[0].shape[0], model.nodes[1].shape[0])
-        model.values = u
+        u = u.reshape(model.nodes[0].shape[0], model.nodes[1].shape[0]).to(
+            dtype=model.values.dtype
+        )
+        model.values.data = u
         return model
 
     def plot_solution(
