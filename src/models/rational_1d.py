@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from typing import Tuple, Callable
+from typing import Tuple, Callable, List, Union
 
 
 def get_cheb_nodes(n: int) -> torch.Tensor:
@@ -63,10 +63,9 @@ class RationalInterpolation1D(nn.Module):
         self.N = N
         self.domain = domain
         self.domain_length = domain[1] - domain[0]
-        self.to_standard = (
-            lambda x: (2 * x - domain[0] - domain[1]) / self.domain_length
-        )
-        self.from_standard = lambda x: (x + 1) * self.domain_length / 2 + domain[0]
+        # Standard domain is [-1, 1]
+        self.to_standard = lambda x: 2 * (x - self.domain[0]) / self.domain_length - 1
+        self.from_standard = lambda x: (x + 1) * self.domain_length / 2 + self.domain[0]
         self.nodes = get_cheb_nodes(N)
         self.nodes_standard = self.to_standard(self.nodes)
 
@@ -177,7 +176,7 @@ class RationalInterpolation1D(nn.Module):
 
         return f_eval_num / f_eval_denom
 
-    def forward(self, x_eval: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_eval: Union[torch.Tensor, List[torch.Tensor]]) -> torch.Tensor:
         """
         Evaluate rational interpolant at arbitrary evaluation points
 
@@ -187,6 +186,18 @@ class RationalInterpolation1D(nn.Module):
         Returns:
             shape (N_eval) - interpolated values
         """
+        if isinstance(x_eval, List):
+            assert (
+                len(x_eval) == 1
+            ), "Only one dimension supported for 1D rational interpolation"
+            return self._interpolate(
+                x_eval[0],
+                self.values,
+                self.nodes_standard,
+                self.to_standard,
+                self.weights,
+            )
+
         return self._interpolate(
             x_eval,
             self.values,

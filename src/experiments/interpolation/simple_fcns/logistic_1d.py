@@ -11,16 +11,15 @@ from src.experiments.interpolation.simple_fcns.base_analytical_target import (
 )
 from src.models.interpolant_nd import SpectralInterpolationND
 from src.models.mlp import MLP
+from src.models.rational_1d import RationalInterpolation1D
 
 
-class Sine1DTarget(BaseAnalyticalTarget):
+class Logistic1DTarget(BaseAnalyticalTarget):
     def __init__(self):
         super().__init__(
-            "sine_1d",
-            f=lambda x: torch.sin(x),
-            domain=[(0, 2 * torch.pi)],
-            derivative=lambda x: torch.cos(x),
-            second_derivative=lambda x: -torch.sin(x),
+            "logistic_1d",
+            f=lambda x: -1.0 + 2.0 / (1.0 + torch.exp(-50 * (0.5 - torch.abs(x)))),
+            domain=[(-1, 1)],
         )
 
     def plot_comparison(
@@ -124,7 +123,7 @@ class Sine1DTarget(BaseAnalyticalTarget):
                     x_eval,
                     f_train_true,
                     f_eval_pred,
-                    save_path=os.path.join(save_dir, f"sine_1d_solution_{epoch}.png"),
+                    save_path=os.path.join(save_dir, f"abs_1d_solution_{epoch}.png"),
                 )
 
         # Plot loss history
@@ -137,24 +136,25 @@ class Sine1DTarget(BaseAnalyticalTarget):
         plt.close()
 
 
-# Compare interpolation of sin(x) using different methods:
+# Compare interpolation of abs(x) using different methods:
 # 1. Neural network
-# 2a. Polynomial interpolation (Chebyshev, training points are uniformly distributed)
-# 2. Polynomial interpolation (Chebyshev, training points are Chebyshev distributed)
-# 3. Polynomial interpolation (Fourier)
+# 2. Polynomial interpolation
+# 3. Barycentric rational interpolation
 
 if __name__ == "__main__":
 
     torch.set_default_dtype(torch.float64)
 
     # Problem setup
-    target = Sine1DTarget()
-    n_samples = 21
+    target = Logistic1DTarget()
+    n_samples = 41
     n_eval = 200
     x_eval = torch.linspace(target.domain[0][0], target.domain[0][1], n_eval)
 
     # 1. Neural network
-    save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/sine_1d/mlp"
+    save_dir = (
+        "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/logistic_1d/mlp"
+    )
     model_mlp = MLP(n_dim=1, hidden_dim=32, activation=torch.tanh)
     lr = 1e-3
     optimizer = torch.optim.Adam(model_mlp.parameters(), lr=lr)
@@ -174,9 +174,9 @@ if __name__ == "__main__":
         save_dir=save_dir,
     )
 
-    # 2a. Polynomial interpolation (Chebyshev, training points are uniformly distributed)
-    save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/sine_1d/chebyshev_uniform"
-    n_x = 21
+    # 2. Polynomial interpolation
+    save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/logistic_1d/chebyshev"
+    n_x = 41
     bases = ["chebyshev"]
     domains = target.domain
     model_cheb_uniform = SpectralInterpolationND(
@@ -188,7 +188,7 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(model_cheb_uniform.parameters(), lr=lr)
     n_epochs = 10000
     plot_every = 100
-    basis_type = "fourier"
+    basis_type = "chebyshev"
     sample_type = "uniform"
     target.train_model(
         model=model_cheb_uniform,
@@ -202,54 +202,18 @@ if __name__ == "__main__":
         save_dir=save_dir,
     )
 
-    # 2b. Polynomial interpolation (Chebyshev, training points are Chebyshev distributed)
-    save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/sine_1d/chebyshev_chebyshev"
+    # 3. Barycentric rational interpolation
+    save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/logistic_1d/rational"
     n_x = 21
-    bases = ["chebyshev"]
-    domains = target.domain
-    model_cheb_chebyshev = SpectralInterpolationND(
-        Ns=[n_x],
-        bases=bases,
-        domains=domains,
-    )
+    model_rational = RationalInterpolation1D(N=n_x, domain=target.domain[0])
     lr = 1e-3
-    optimizer = torch.optim.Adam(model_cheb_chebyshev.parameters(), lr=lr)
-    n_epochs = 10000
+    optimizer = torch.optim.Adam(model_rational.parameters(), lr=lr)
+    n_epochs = 20000
     plot_every = 100
     basis_type = "chebyshev"
-    sample_type = "uniform"
+    sample_type = "standard"
     target.train_model(
-        model=model_cheb_chebyshev,
-        n_epochs=n_epochs,
-        optimizer=optimizer,
-        basis_type=basis_type,
-        sample_type=sample_type,
-        n_samples=n_samples,
-        x_eval=x_eval,
-        plot_every=plot_every,
-        save_dir=save_dir,
-    )
-
-    # 3. Polynomial interpolation (Fourier)
-    save_dir = (
-        "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/sine_1d/fourier"
-    )
-    n_x = 20
-    bases = ["fourier"]
-    domains = target.domain
-    model_fourier = SpectralInterpolationND(
-        Ns=[n_x],
-        bases=bases,
-        domains=domains,
-    )
-    lr = 1e-3
-    optimizer = torch.optim.Adam(model_fourier.parameters(), lr=lr)
-    n_epochs = 10000
-    plot_every = 100
-    basis_type = "fourier"
-    sample_type = "uniform"
-    target.train_model(
-        model=model_fourier,
+        model=model_rational,
         n_epochs=n_epochs,
         optimizer=optimizer,
         basis_type=basis_type,

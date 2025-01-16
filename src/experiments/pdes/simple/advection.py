@@ -5,8 +5,9 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 from typing import List, Callable
+
 from src.experiments.pdes.base_pde import BasePDE
-from models.interpolant_nd import SpectralInterpolationND
+from src.models.interpolant_nd import SpectralInterpolationND
 
 """
 1D Advection equation:

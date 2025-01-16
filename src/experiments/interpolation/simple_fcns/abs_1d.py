@@ -9,7 +9,7 @@ from typing import Callable
 from src.experiments.interpolation.simple_fcns.base_analytical_target import (
     BaseAnalyticalTarget,
 )
-from models.interpolant_nd import SpectralInterpolationND
+from src.models.interpolant_nd import SpectralInterpolationND
 from src.models.mlp import MLP
 from src.models.rational_1d import RationalInterpolation1D
 
@@ -149,7 +149,7 @@ if __name__ == "__main__":
 
     # Problem setup
     target = Abs1DTarget()
-    n_samples = 21
+    n_samples = 51
     n_eval = 200
     x_eval = torch.linspace(target.domain[0][0], target.domain[0][1], n_eval)
 
@@ -178,7 +178,7 @@ if __name__ == "__main__":
     save_dir = (
         "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/abs_1d/chebyshev"
     )
-    n_x = 21
+    n_x = 41
     bases = ["chebyshev"]
     domains = target.domain
     model_cheb_uniform = SpectralInterpolationND(
@@ -209,15 +209,13 @@ if __name__ == "__main__":
         "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/abs_1d/rational"
     )
     n_x = 21
-    bases = ["chebyshev"]
-    domains = target.domain
-    model_rational = RationalInterpolation1D(N=n_x, domain=target.domain)
+    model_rational = RationalInterpolation1D(N=n_x, domain=target.domain[0])
     lr = 1e-3
     optimizer = torch.optim.Adam(model_rational.parameters(), lr=lr)
-    n_epochs = 10000
+    n_epochs = 20000
     plot_every = 100
     basis_type = "chebyshev"
-    sample_type = "uniform"
+    sample_type = "standard"
     target.train_model(
         model=model_rational,
         n_epochs=n_epochs,

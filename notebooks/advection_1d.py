@@ -31,7 +31,7 @@ BASE_DIR = "/scratch/interpolants-torch"
 sys.path.append(BASE_DIR)
 
 # %%
-from models.interpolant_nd import SpectralInterpolationND
+from src.models.interpolant_nd import SpectralInterpolationND
 from src.experiments.pdes.simple.advection import Advection
 
 # %% [markdown]
