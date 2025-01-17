@@ -10,28 +10,31 @@ from src.experiments.pdes.base_pde import BasePDE
 from src.models.interpolant_nd import SpectralInterpolationND
 
 """
-1D Advection equation:
-u_t + c * u_x = 0
-t in [0, t_final] (default: t_final = 1)
-x in [0, 2*pi]
-u(t=0, x) = u_0(x) (default: u_0(x) = sin(x))
-u(t, x=0) = u(t, x=2*pi)
+1D Wave equation:
+u_tt - c^2 * u_xx = 0
+t in [0, 1]
+x in [0, 1]
+u(t=0, x) = sin(pi*x) + 1/2 * sin(beta*pi*x)
+u_t(t=0, x) = 0
+u(t, x=0) = u(t, x=1) = 0
 
 Solution:
-u(t, x) = u_0(x - c*t)
+u(t, x) = sin(pi*x) cos(2*pi*t) + 1/2 * sin(beta*pi*x) cos(2*beta*pi*t)
 """
 
 
-class Advection(BasePDE):
-    def __init__(self, c: float, t_final: float = 1, u_0: Callable = None):
-        super().__init__("advection", [(0, 1), (0, 2 * torch.pi)])
+class Wave(BasePDE):
+    def __init__(self, c: float = 2, beta: float = 5):
+        super().__init__("wave", [(0, 1), (0, 1)])
         self.c = c
-        self.t_final = t_final
-        if u_0 is None:
-            self.u_0 = lambda x: torch.sin(x)
-        else:
-            self.u_0 = u_0
-        self.exact_solution = lambda t, x: self.u_0(x - self.c * t)
+        self.beta = beta
+        self.u_0 = lambda x: torch.sin(torch.pi * x) + 0.5 * torch.sin(
+            beta * torch.pi * x
+        )
+        self.u_0_t = lambda x: 0
+        self.exact_solution = lambda t, x: torch.sin(torch.pi * x) * torch.cos(
+            2 * torch.pi * t
+        ) + 0.5 * torch.sin(beta * torch.pi * x) * torch.cos(2 * beta * torch.pi * t)
 
     def get_exact_solution(self, t, x):
         return self.exact_solution(t, x)
@@ -53,10 +56,11 @@ class Advection(BasePDE):
         if isinstance(model, SpectralInterpolationND):
             # PDE
             u = model.interpolate(pde_nodes)
-            u_t = model.derivative(pde_nodes, k=(1, 0))  # (N_t, N_x)
-            u_x = model.derivative(pde_nodes, k=(0, 1))  # (N_t, N_x)
+            u_tt = model.derivative(pde_nodes, k=(2, 0))
+            u_xx = model.derivative(pde_nodes, k=(0, 2))
             # IC
-            u_ic = model.interpolate([torch.tensor([0.0]), ic_nodes])[0]  # (N_ic)
+            u_ic = model.interpolate([torch.tensor([0.0]), ic_nodes])[0]
+            u_t_ic = model.derivative([torch.tensor([0.0]), ic_nodes], k=(1, 0))[0]
         else:
             # Create mesh grid
             t_grid, x_grid = torch.meshgrid(pde_nodes[0], pde_nodes[1], indexing="ij")
@@ -67,18 +71,20 @@ class Advection(BasePDE):
             grads = torch.autograd.grad(u.sum(), pde_nodes_grid, create_graph=True)[
                 0
             ]  # (N_t*N_x, 2)
-            u_t = grads[:, 0].reshape(n_t, n_x)
-            u_x = grads[:, 1].reshape(n_t, n_x)
+            u_tt = grads[:, 0].reshape(n_t, n_x)
+            u_xx = grads[:, 1].reshape(n_t, n_x)
             # IC
             ic_nodes_grid = torch.stack([torch.zeros_like(ic_nodes), ic_nodes], dim=1)
             u_ic = model(ic_nodes_grid).reshape(n_ic)
+            u_t_ic = model.derivative(ic_nodes_grid, k=(1, 0))[0].reshape(-1)
 
         # PDE loss
-        pde_residual = u_t + self.c * u_x
+        pde_residual = u_tt - self.c**2 * u_xx
         pde_loss = torch.mean(pde_residual**2)
         # IC loss
         ic_residual = u_ic - self.u_0(ic_nodes)
-        ic_loss = torch.mean(ic_residual**2)
+        ic_dt_residual = u_t_ic - self.u_0_t(ic_nodes)
+        ic_loss = torch.mean(ic_residual**2) + torch.mean(ic_dt_residual**2)
         # Total loss
         loss = pde_loss + ic_weight * ic_loss
         return loss, pde_loss, ic_loss
@@ -88,21 +94,24 @@ class Advection(BasePDE):
         n_t, n_x = model.nodes[0].shape[0], model.nodes[1].shape[0]
 
         # PDE operator
-        D_t = model.derivative_matrix(k=(1, 0))  # (N_t*N_x, N_t*N_x)
-        D_x = model.derivative_matrix(k=(0, 1))  # (N_t*N_x, N_t*N_x)
-        L = D_t + self.c * D_x
+        D_t = model.derivative_matrix(k=(1, 0))  # (N_t, N_t*N_x)
+        D_tt = model.derivative_matrix(k=(2, 0))  # (N_t*N_x, N_t*N_x)
+        D_xx = model.derivative_matrix(k=(0, 2))  # (N_t*N_x, N_t*N_x)
+        L = D_tt - self.c**2 * D_xx
 
         # Initial condition: extract t=0 values
         IC = torch.zeros(n_x, n_t * n_x).to(dtype=model.values.dtype)
         for i in range(n_x):
             IC[i, n_x * (n_t - 1) + i] = 1  # Set t=0 value to 1 for each x
+        D_t_IC = D_t[n_x * (n_t - 1) : n_x * n_t, :]
 
         # Right hand side
-        b = torch.zeros(n_t * n_x + n_x, dtype=model.values.dtype)
-        b[n_t * n_x :] = self.u_0(model.nodes[1])
+        b = torch.zeros(n_t * n_x + n_x + n_x, dtype=model.values.dtype)
+        b[n_t * n_x : n_t * n_x + n_x] = self.u_0(model.nodes[1])
+        b[n_t * n_x + n_x :] = self.u_0_t(model.nodes[1])
 
         # Full system
-        A = torch.cat([L, IC], dim=0)
+        A = torch.cat([L, IC, D_t_IC], dim=0)
         return A, b
 
     def fit_least_squares(self, model: SpectralInterpolationND):
@@ -126,7 +135,7 @@ class Advection(BasePDE):
         # Predicted solution
         im1 = ax1.imshow(
             u.T,
-            extent=[0, self.t_final, 0, 2 * torch.pi],
+            extent=[0, 1, 0, 1],
             origin="lower",
             aspect="auto",
         )
@@ -138,7 +147,7 @@ class Advection(BasePDE):
         u_true = self.get_exact_solution(t_mesh, x_mesh)
         im2 = ax2.imshow(
             u_true.T,
-            extent=[0, self.t_final, 0, 2 * torch.pi],
+            extent=[0, 1, 0, 1],
             origin="lower",
             aspect="auto",
         )
@@ -149,7 +158,7 @@ class Advection(BasePDE):
         error = torch.abs(u - u_true)
         im3 = ax3.imshow(
             error.T,
-            extent=[0, self.t_final, 0, 2 * torch.pi],
+            extent=[0, 1, 0, 1],
             origin="lower",
             aspect="auto",
             norm="log",
@@ -242,7 +251,7 @@ class Advection(BasePDE):
                     u_eval.detach(),
                     t_eval,
                     x_eval,
-                    save_path=os.path.join(save_dir, f"advection_solution_{epoch}.png"),
+                    save_path=os.path.join(save_dir, f"wave_solution_{epoch}.png"),
                 )
 
         # Save history
@@ -250,25 +259,21 @@ class Advection(BasePDE):
 
 
 if __name__ == "__main__":
-
-    torch.set_default_dtype(torch.float64)
-
     # Problem setup
-    c = 80
-    t_final = 1
-    u_0 = lambda x: torch.sin(x)
-    pde = Advection(c=c, t_final=t_final, u_0=u_0)
-    save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/advection"
+    c = 2
+    beta = 5
+    pde = Wave(c=c, beta=beta)
+    save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/wave"
 
     # Evaluation setup
     n_eval = 200
-    t_eval = torch.linspace(0, t_final, n_eval)
+    t_eval = torch.linspace(0, 1, n_eval)
     x_eval = torch.linspace(0, 2 * torch.pi, n_eval + 1)[:-1]
 
     # Baseline: least squares
     print("Fitting model with least squares...")
-    n_t_ls = 2 * c + 1
-    n_x_ls = 2 * c
+    n_t_ls = 81
+    n_x_ls = 80
     bases_ls = ["chebyshev", "fourier"]
     model_ls = SpectralInterpolationND(
         Ns=[n_t_ls, n_x_ls],
@@ -280,13 +285,13 @@ if __name__ == "__main__":
         model_ls.interpolate([t_eval, x_eval]).detach(),
         t_eval,
         x_eval,
-        save_path=os.path.join(save_dir, "advection_ls_solution.png"),
+        save_path=os.path.join(save_dir, "wave_ls_solution.png"),
     )
 
     # Model setup
     print("Training model with first-order method...")
-    n_t = 2 * c + 1
-    n_x = 2 * c
+    n_t = 21
+    n_x = 20
     bases = ["chebyshev", "fourier"]
     model = SpectralInterpolationND(
         Ns=[n_t, n_x],
@@ -295,14 +300,13 @@ if __name__ == "__main__":
     )
 
     # Training setup
-    n_epochs = 10000
+    n_epochs = 100000
     lr = 1e-3
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    # PDE
     sample_type = ["uniform", "uniform"]
-    n_t_train = 4 * c + 1
-    n_x_train = 4 * c
-    n_ic_train = 4 * c
+    n_t_train = 41
+    n_x_train = 40
+    n_ic_train = 40
     ic_weight = 10
 
     # Train model
@@ -317,6 +321,6 @@ if __name__ == "__main__":
         ic_weight=ic_weight,
         t_eval=t_eval,
         x_eval=x_eval,
-        plot_every=100,
+        plot_every=1000,
         save_dir=save_dir,
     )

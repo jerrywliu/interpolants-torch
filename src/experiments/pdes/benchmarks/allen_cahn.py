@@ -10,31 +10,24 @@ from src.experiments.pdes.base_pde import BasePDE
 from src.models.interpolant_nd import SpectralInterpolationND
 
 """
-1D Advection equation:
-u_t + c * u_x = 0
-t in [0, t_final] (default: t_final = 1)
-x in [0, 2*pi]
-u(t=0, x) = u_0(x) (default: u_0(x) = sin(x))
-u(t, x=0) = u(t, x=2*pi)
-
-Solution:
-u(t, x) = u_0(x - c*t)
+1D Allen-Cahn equation:
+u_t - eps * u_xx - 5u + 5u^3 = 0
+t in [0, 1]
+x in [-1, 1]
+u(t=0, x) = x^2 cos(pi*x)
+u(t, x=-1) = u(t, x=1) = 0
 """
 
 
-class Advection(BasePDE):
-    def __init__(self, c: float, t_final: float = 1, u_0: Callable = None):
-        super().__init__("advection", [(0, 1), (0, 2 * torch.pi)])
-        self.c = c
-        self.t_final = t_final
-        if u_0 is None:
-            self.u_0 = lambda x: torch.sin(x)
-        else:
-            self.u_0 = u_0
-        self.exact_solution = lambda t, x: self.u_0(x - self.c * t)
+class AllenCahn(BasePDE):
+    def __init__(self, eps: float = 1e-4):
+        super().__init__("allen_cahn", [(0, 1), (-1, 1)])
+        self.eps = eps
+        self.u_0 = lambda x: x**2 * torch.cos(torch.pi * x)
 
     def get_exact_solution(self, t, x):
-        return self.exact_solution(t, x)
+        # raise NotImplementedError("Exact solution not implemented for Allen-Cahn equation")
+        return 0
 
     def get_pde_loss(
         self,
@@ -51,30 +44,26 @@ class Advection(BasePDE):
         n_ic = ic_nodes.shape[0]
 
         if isinstance(model, SpectralInterpolationND):
-            # PDE
             u = model.interpolate(pde_nodes)
-            u_t = model.derivative(pde_nodes, k=(1, 0))  # (N_t, N_x)
-            u_x = model.derivative(pde_nodes, k=(0, 1))  # (N_t, N_x)
+            u_t = model.derivative(pde_nodes, k=(1, 0))
+            u_xx = model.derivative(pde_nodes, k=(0, 2))
             # IC
-            u_ic = model.interpolate([torch.tensor([0.0]), ic_nodes])[0]  # (N_ic)
+            u_ic = model.interpolate([torch.tensor([0.0]), ic_nodes])[0]
         else:
-            # Create mesh grid
             t_grid, x_grid = torch.meshgrid(pde_nodes[0], pde_nodes[1], indexing="ij")
             pde_nodes_grid = torch.stack([t_grid.flatten(), x_grid.flatten()], dim=1)
             pde_nodes_grid.requires_grad = True
             # PDE
             u = model(pde_nodes_grid).reshape(n_t, n_x)
-            grads = torch.autograd.grad(u.sum(), pde_nodes_grid, create_graph=True)[
-                0
-            ]  # (N_t*N_x, 2)
+            grads = torch.autograd.grad(u.sum(), pde_nodes_grid, create_graph=True)[0]
             u_t = grads[:, 0].reshape(n_t, n_x)
-            u_x = grads[:, 1].reshape(n_t, n_x)
+            u_xx = model.derivative(pde_nodes_grid, k=(0, 2))
             # IC
             ic_nodes_grid = torch.stack([torch.zeros_like(ic_nodes), ic_nodes], dim=1)
             u_ic = model(ic_nodes_grid).reshape(n_ic)
 
         # PDE loss
-        pde_residual = u_t + self.c * u_x
+        pde_residual = u_t - self.eps * u_xx - 5 * u + 5 * u**3
         pde_loss = torch.mean(pde_residual**2)
         # IC loss
         ic_residual = u_ic - self.u_0(ic_nodes)
@@ -83,36 +72,15 @@ class Advection(BasePDE):
         loss = pde_loss + ic_weight * ic_loss
         return loss, pde_loss, ic_loss
 
-    # Get the least squares problem equivalent to a spectral solve
     def get_least_squares(self, model: SpectralInterpolationND):
-        n_t, n_x = model.nodes[0].shape[0], model.nodes[1].shape[0]
-
-        # PDE operator
-        D_t = model.derivative_matrix(k=(1, 0))  # (N_t*N_x, N_t*N_x)
-        D_x = model.derivative_matrix(k=(0, 1))  # (N_t*N_x, N_t*N_x)
-        L = D_t + self.c * D_x
-
-        # Initial condition: extract t=0 values
-        IC = torch.zeros(n_x, n_t * n_x).to(dtype=model.values.dtype)
-        for i in range(n_x):
-            IC[i, n_x * (n_t - 1) + i] = 1  # Set t=0 value to 1 for each x
-
-        # Right hand side
-        b = torch.zeros(n_t * n_x + n_x, dtype=model.values.dtype)
-        b[n_t * n_x :] = self.u_0(model.nodes[1])
-
-        # Full system
-        A = torch.cat([L, IC], dim=0)
-        return A, b
+        raise NotImplementedError(
+            "Least squares not implemented for Allen-Cahn equation"
+        )
 
     def fit_least_squares(self, model: SpectralInterpolationND):
-        A, b = self.get_least_squares(model)
-        u = torch.linalg.lstsq(A, b).solution
-        u = u.reshape(model.nodes[0].shape[0], model.nodes[1].shape[0]).to(
-            dtype=model.values.dtype
+        raise NotImplementedError(
+            "Least squares not implemented for Allen-Cahn equation"
         )
-        model.values.data = u
-        return model
 
     def plot_solution(
         self,
@@ -126,7 +94,7 @@ class Advection(BasePDE):
         # Predicted solution
         im1 = ax1.imshow(
             u.T,
-            extent=[0, self.t_final, 0, 2 * torch.pi],
+            extent=[0, 1, -1, 1],
             origin="lower",
             aspect="auto",
         )
@@ -138,7 +106,7 @@ class Advection(BasePDE):
         u_true = self.get_exact_solution(t_mesh, x_mesh)
         im2 = ax2.imshow(
             u_true.T,
-            extent=[0, self.t_final, 0, 2 * torch.pi],
+            extent=[0, 1, -1, 1],
             origin="lower",
             aspect="auto",
         )
@@ -149,13 +117,13 @@ class Advection(BasePDE):
         error = torch.abs(u - u_true)
         im3 = ax3.imshow(
             error.T,
-            extent=[0, self.t_final, 0, 2 * torch.pi],
+            extent=[0, 1, -1, 1],
             origin="lower",
             aspect="auto",
             norm="log",
         )
         plt.colorbar(im3, ax=ax3)
-        ax3.set_title("Log Error")
+        ax3.set_title("Error")
 
         plt.tight_layout()
 
@@ -242,7 +210,9 @@ class Advection(BasePDE):
                     u_eval.detach(),
                     t_eval,
                     x_eval,
-                    save_path=os.path.join(save_dir, f"advection_solution_{epoch}.png"),
+                    save_path=os.path.join(
+                        save_dir, f"allen_cahn_solution_{epoch}.png"
+                    ),
                 )
 
         # Save history
@@ -250,43 +220,14 @@ class Advection(BasePDE):
 
 
 if __name__ == "__main__":
-
-    torch.set_default_dtype(torch.float64)
-
     # Problem setup
-    c = 80
-    t_final = 1
-    u_0 = lambda x: torch.sin(x)
-    pde = Advection(c=c, t_final=t_final, u_0=u_0)
-    save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/advection"
-
-    # Evaluation setup
-    n_eval = 200
-    t_eval = torch.linspace(0, t_final, n_eval)
-    x_eval = torch.linspace(0, 2 * torch.pi, n_eval + 1)[:-1]
-
-    # Baseline: least squares
-    print("Fitting model with least squares...")
-    n_t_ls = 2 * c + 1
-    n_x_ls = 2 * c
-    bases_ls = ["chebyshev", "fourier"]
-    model_ls = SpectralInterpolationND(
-        Ns=[n_t_ls, n_x_ls],
-        bases=bases_ls,
-        domains=pde.domain,
-    )
-    model_ls = pde.fit_least_squares(model_ls)
-    pde.plot_solution(
-        model_ls.interpolate([t_eval, x_eval]).detach(),
-        t_eval,
-        x_eval,
-        save_path=os.path.join(save_dir, "advection_ls_solution.png"),
-    )
+    eps = 1e-4
+    pde = AllenCahn(eps=eps)
+    save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/allen_cahn"
 
     # Model setup
-    print("Training model with first-order method...")
-    n_t = 2 * c + 1
-    n_x = 2 * c
+    n_t = 21
+    n_x = 20
     bases = ["chebyshev", "fourier"]
     model = SpectralInterpolationND(
         Ns=[n_t, n_x],
@@ -298,12 +239,16 @@ if __name__ == "__main__":
     n_epochs = 10000
     lr = 1e-3
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    # PDE
     sample_type = ["uniform", "uniform"]
-    n_t_train = 4 * c + 1
-    n_x_train = 4 * c
-    n_ic_train = 4 * c
+    n_t_train = 41
+    n_x_train = 40
+    n_ic_train = 40
     ic_weight = 10
+
+    # Evaluation setup
+    n_eval = 200
+    t_eval = torch.linspace(0, 1, n_eval)
+    x_eval = torch.linspace(-1, 1, n_eval + 1)[:-1]
 
     # Train model
     pde.train_model(

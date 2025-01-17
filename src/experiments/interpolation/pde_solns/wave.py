@@ -8,14 +8,15 @@ from src.experiments.interpolation.simple_fcns.base_analytical_target import (
 from src.models.interpolant_nd import SpectralInterpolationND
 
 
-class AdvectionTarget(BaseAnalyticalTarget):
-    def __init__(self, c: float = 80):
+class WaveTarget(BaseAnalyticalTarget):
+    def __init__(self, beta: float = 5):
         super().__init__(
-            "advection",
-            f=lambda t, x: torch.sin(x - c * t),
-            domain=[(0, 1), (0, 2 * torch.pi)],
+            "wave",
+            f=lambda t, x: torch.sin(torch.pi * x) * torch.cos(2 * torch.pi * t)
+            + 0.5 * torch.sin(beta * torch.pi * x) * torch.cos(2 * beta * torch.pi * t),
+            domain=[(0, 1), (0, 1)],
         )
-        self.c = c
+        self.beta = beta
 
     def get_exact_solution(self, t: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
         return self.f(t, x)
@@ -32,7 +33,7 @@ class AdvectionTarget(BaseAnalyticalTarget):
         # Predicted solution
         im1 = ax1.imshow(
             u.T,
-            extent=[0, 1, 0, 2 * torch.pi],
+            extent=[0, 1, 0, 1],
             origin="lower",
             aspect="auto",
         )
@@ -44,7 +45,7 @@ class AdvectionTarget(BaseAnalyticalTarget):
         u_true = self.get_exact_solution(t_mesh, x_mesh)
         im2 = ax2.imshow(
             u_true.T,
-            extent=[0, 1, 0, 2 * torch.pi],
+            extent=[0, 1, 0, 1],
             origin="lower",
             aspect="auto",
         )
@@ -56,7 +57,7 @@ class AdvectionTarget(BaseAnalyticalTarget):
         l2_rel_error = torch.norm(u - u_true, p=2) / torch.norm(u_true, p=2)
         im3 = ax3.imshow(
             error.T,
-            extent=[0, 1, 0, 2 * torch.pi],
+            extent=[0, 1, 0, 1],
             origin="lower",
             aspect="auto",
             norm="log",
@@ -77,17 +78,13 @@ if __name__ == "__main__":
     torch.set_default_dtype(torch.float64)
 
     # Problem setup
-    target = AdvectionTarget(c=80)
+    target = WaveTarget(beta=5)
 
     # Sanity check: ensure that the interpolation model is expressive enough to fit the target
-    save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/advection/sanity_check"
-    for n_t in [
-        target.c // 4 + 1,
-        target.c // 2 + 1,
-        target.c + 1,
-        2 * target.c + 1,
-        4 * target.c + 1,
-    ]:
+    save_dir = (
+        "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/wave/sanity_check"
+    )
+    for n_t in [21, 41, 81, 161, 321]:
         n_x = n_t - 1
         bases = ["chebyshev", "fourier"]
         model = SpectralInterpolationND(
@@ -103,12 +100,12 @@ if __name__ == "__main__":
         # Evaluation setup
         n_eval = 200
         t_eval = torch.linspace(0, 1, n_eval)
-        x_eval = torch.linspace(0, 2 * torch.pi, n_eval + 1)[:-1]
+        x_eval = torch.linspace(0, 1, n_eval + 1)[:-1]
 
         # Plot solution
         target.plot_solution(
             model.interpolate([t_eval, x_eval]).detach(),
             t_eval,
             x_eval,
-            save_path=os.path.join(save_dir, f"advection_soln_nt={n_t}_nx={n_x}.png"),
+            save_path=os.path.join(save_dir, f"wave_soln_nt={n_t}_nx={n_x}.png"),
         )

@@ -10,28 +10,34 @@ from src.experiments.pdes.base_pde import BasePDE
 from src.models.interpolant_nd import SpectralInterpolationND
 
 """
-1D Advection equation:
-u_t + c * u_x = 0
+1D Reaction equation:
+u_t - rho * u(1-u) = 0
 t in [0, t_final] (default: t_final = 1)
 x in [0, 2*pi]
-u(t=0, x) = u_0(x) (default: u_0(x) = sin(x))
+u(t=0, x) = u_0(x) (default: u_0(x) = exp(-(x - pi)**2 / (2 * (pi / 4)**2)))
 u(t, x=0) = u(t, x=2*pi)
 
 Solution:
-u(t, x) = u_0(x - c*t)
+u(t, x) = u_0(x) exp(rho * t) / [u_0(x) exp(rho * t) + (1 - u_0(x))]
 """
 
 
-class Advection(BasePDE):
-    def __init__(self, c: float, t_final: float = 1, u_0: Callable = None):
-        super().__init__("advection", [(0, 1), (0, 2 * torch.pi)])
-        self.c = c
+class Reaction(BasePDE):
+    def __init__(self, rho: float, t_final: float = 1, u_0: Callable = None):
+        super().__init__("reaction", [(0, 1), (0, 2 * torch.pi)])
+        self.rho = rho
         self.t_final = t_final
         if u_0 is None:
-            self.u_0 = lambda x: torch.sin(x)
+            self.u_0 = lambda x: torch.exp(
+                -((x - torch.pi) ** 2) / (2 * (torch.pi / 4) ** 2)
+            )
         else:
             self.u_0 = u_0
-        self.exact_solution = lambda t, x: self.u_0(x - self.c * t)
+        self.exact_solution = (
+            lambda t, x: self.u_0(x)
+            * torch.exp(self.rho * t)
+            / (self.u_0(x) * torch.exp(self.rho * t) + (1 - self.u_0(x)))
+        )
 
     def get_exact_solution(self, t, x):
         return self.exact_solution(t, x)
@@ -54,7 +60,6 @@ class Advection(BasePDE):
             # PDE
             u = model.interpolate(pde_nodes)
             u_t = model.derivative(pde_nodes, k=(1, 0))  # (N_t, N_x)
-            u_x = model.derivative(pde_nodes, k=(0, 1))  # (N_t, N_x)
             # IC
             u_ic = model.interpolate([torch.tensor([0.0]), ic_nodes])[0]  # (N_ic)
         else:
@@ -68,13 +73,12 @@ class Advection(BasePDE):
                 0
             ]  # (N_t*N_x, 2)
             u_t = grads[:, 0].reshape(n_t, n_x)
-            u_x = grads[:, 1].reshape(n_t, n_x)
             # IC
             ic_nodes_grid = torch.stack([torch.zeros_like(ic_nodes), ic_nodes], dim=1)
             u_ic = model(ic_nodes_grid).reshape(n_ic)
 
         # PDE loss
-        pde_residual = u_t + self.c * u_x
+        pde_residual = u_t - self.rho * u * (1 - u)
         pde_loss = torch.mean(pde_residual**2)
         # IC loss
         ic_residual = u_ic - self.u_0(ic_nodes)
@@ -84,13 +88,13 @@ class Advection(BasePDE):
         return loss, pde_loss, ic_loss
 
     # Get the least squares problem equivalent to a spectral solve
+    # Since this problem is nonlinear, we perform Picard iteration using the model's current guess for u
     def get_least_squares(self, model: SpectralInterpolationND):
         n_t, n_x = model.nodes[0].shape[0], model.nodes[1].shape[0]
 
         # PDE operator
         D_t = model.derivative_matrix(k=(1, 0))  # (N_t*N_x, N_t*N_x)
-        D_x = model.derivative_matrix(k=(0, 1))  # (N_t*N_x, N_t*N_x)
-        L = D_t + self.c * D_x
+        L = D_t
 
         # Initial condition: extract t=0 values
         IC = torch.zeros(n_x, n_t * n_x).to(dtype=model.values.dtype)
@@ -99,19 +103,27 @@ class Advection(BasePDE):
 
         # Right hand side
         b = torch.zeros(n_t * n_x + n_x, dtype=model.values.dtype)
+        # Picard iteration: calculate rho * u_0(x) * (1 - u_0(x))
+        L_rhs = self.rho * model(model.nodes) * (1 - model(model.nodes))  # (N_t*N_x)
+        b[: n_t * n_x] = L_rhs
+        # IC
         b[n_t * n_x :] = self.u_0(model.nodes[1])
 
         # Full system
         A = torch.cat([L, IC], dim=0)
         return A, b
 
-    def fit_least_squares(self, model: SpectralInterpolationND):
-        A, b = self.get_least_squares(model)
-        u = torch.linalg.lstsq(A, b).solution
-        u = u.reshape(model.nodes[0].shape[0], model.nodes[1].shape[0]).to(
-            dtype=model.values.dtype
-        )
-        model.values.data = u
+    def fit_least_squares(self, model: SpectralInterpolationND, max_iter: int = 100):
+        # Set model values to initial condition
+        IC = self.u_0(model.nodes[1])
+        model.values.data = IC[None, :]
+        # Perform Picard iteration
+        for i in range(self.max_iter):
+            A, b = self.get_least_squares(model)
+            u = torch.linalg.lstsq(A, b).solution
+            model.values.data = u.reshape(
+                model.nodes[0].shape[0], model.nodes[1].shape[0]
+            )
         return model
 
     def plot_solution(
@@ -242,7 +254,7 @@ class Advection(BasePDE):
                     u_eval.detach(),
                     t_eval,
                     x_eval,
-                    save_path=os.path.join(save_dir, f"advection_solution_{epoch}.png"),
+                    save_path=os.path.join(save_dir, f"reaction_solution_{epoch}.png"),
                 )
 
         # Save history
@@ -250,43 +262,16 @@ class Advection(BasePDE):
 
 
 if __name__ == "__main__":
-
-    torch.set_default_dtype(torch.float64)
-
     # Problem setup
-    c = 80
+    rho = 5
     t_final = 1
-    u_0 = lambda x: torch.sin(x)
-    pde = Advection(c=c, t_final=t_final, u_0=u_0)
-    save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/advection"
-
-    # Evaluation setup
-    n_eval = 200
-    t_eval = torch.linspace(0, t_final, n_eval)
-    x_eval = torch.linspace(0, 2 * torch.pi, n_eval + 1)[:-1]
-
-    # Baseline: least squares
-    print("Fitting model with least squares...")
-    n_t_ls = 2 * c + 1
-    n_x_ls = 2 * c
-    bases_ls = ["chebyshev", "fourier"]
-    model_ls = SpectralInterpolationND(
-        Ns=[n_t_ls, n_x_ls],
-        bases=bases_ls,
-        domains=pde.domain,
-    )
-    model_ls = pde.fit_least_squares(model_ls)
-    pde.plot_solution(
-        model_ls.interpolate([t_eval, x_eval]).detach(),
-        t_eval,
-        x_eval,
-        save_path=os.path.join(save_dir, "advection_ls_solution.png"),
-    )
+    u_0 = lambda x: torch.exp(-((x - torch.pi) ** 2) / (2 * (torch.pi / 4) ** 2))
+    pde = Reaction(rho=rho, t_final=t_final, u_0=u_0)
+    save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/reaction"
 
     # Model setup
-    print("Training model with first-order method...")
-    n_t = 2 * c + 1
-    n_x = 2 * c
+    n_t = 2 * rho + 1
+    n_x = 2 * rho
     bases = ["chebyshev", "fourier"]
     model = SpectralInterpolationND(
         Ns=[n_t, n_x],
@@ -295,15 +280,20 @@ if __name__ == "__main__":
     )
 
     # Training setup
-    n_epochs = 10000
+    n_epochs = 100000
     lr = 1e-3
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     # PDE
     sample_type = ["uniform", "uniform"]
-    n_t_train = 4 * c + 1
-    n_x_train = 4 * c
-    n_ic_train = 4 * c
+    n_t_train = 4 * rho + 1
+    n_x_train = 4 * rho
+    n_ic_train = 4 * rho
     ic_weight = 10
+
+    # Evaluation setup
+    n_eval = 200
+    t_eval = torch.linspace(0, t_final, n_eval)
+    x_eval = torch.linspace(0, 2 * torch.pi, n_eval + 1)[:-1]
 
     # Train model
     pde.train_model(
@@ -317,6 +307,6 @@ if __name__ == "__main__":
         ic_weight=ic_weight,
         t_eval=t_eval,
         x_eval=x_eval,
-        plot_every=100,
+        plot_every=1000,
         save_dir=save_dir,
     )
