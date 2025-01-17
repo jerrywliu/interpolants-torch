@@ -50,6 +50,40 @@ class AdvectionTarget(BaseAnalyticalTarget):
             second_derivative=lambda x: 0.0,  # Dummy value.
         )
 
+    def plot_comparison(
+        self,
+        train_grid,
+        f_train_pred,
+        f_train_true,
+        eval_grid,
+        f_eval_pred,
+        f_eval_true,
+        save_path,
+    ):
+        # We assume that eval_grid is always uniformly, equally spaced. So we
+        # plot the heatmaps on eval_grid, since train_grid may correspond to for
+        # eg chebyshev grid.
+        
+        f_eval_pred = f_eval_pred.detach().cpu().numpy()
+        f_eval_true = f_eval_true.detach().cpu().numpy()
+
+        # Create a figure with 1x2 subplots
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 4))
+
+        ax1.imshow(f_eval_pred.T, cmap="viridis")
+        ax1.set_title("Predicted")
+
+        ax2.imshow(f_eval_true.T, cmap="viridis")
+        ax2.set_title("True")
+
+        # Adjust layout to prevent overlap
+        plt.tight_layout()
+
+        if save_path:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            plt.savefig(save_path)
+            plt.close()
+
     def train_model(
         self,
         model: nn.Module,
@@ -87,6 +121,10 @@ class AdvectionTarget(BaseAnalyticalTarget):
                 type=[t_sample_type, x_sample_type],
             )
 
+            # # We sort here so that 
+            # for i, sampled_pts in enumerate(sampled_pts_per_dim):
+            #     sampled_pts_per_dim[i] = torch.sort(sampled_pts)[0]
+
             train_grid = make_grid(sampled_pts_per_dim[0], sampled_pts_per_dim[1])
 
             # f_train_pred = model([train_grid])
@@ -120,13 +158,15 @@ class AdvectionTarget(BaseAnalyticalTarget):
                 current_time = time() - start_time
                 print(f"Epoch {epoch + 1} completed in {current_time:.2f} seconds")
                 print(f"Evaluation L2 error: {history['eval_l2_error'][-1]:1.3e}")
-                # self.plot_comparison(
-                #     x_train,
-                #     x_eval,
-                #     f_train_true,
-                #     f_eval_pred,
-                #     save_path=os.path.join(save_dir, f"abs_1d_solution_{epoch}.png"),
-                # )
+                self.plot_comparison(
+                    train_grid,
+                    f_train_pred,
+                    f_train_true,
+                    eval_grid,
+                    f_eval_pred,
+                    f_eval_true,
+                    save_path=os.path.join(save_dir, f"adv_{epoch}.png"),
+                )
 
         # Plot loss history
         plt.figure()
@@ -156,21 +196,57 @@ if __name__ == "__main__":
 
     t_eval = torch.linspace(target.domain[0][0], target.domain[0][1], t_n_samples_eval)
     x_eval = torch.linspace(target.domain[1][0], target.domain[1][1], x_n_samples_eval)
-    # eval_grid = make_grid(t_eval, x_eval)
 
-    # 1. Neural network
-    save_dir = "/common/results/interpolation/advection/mlp"
-    model_mlp = MLP(n_dim=2, hidden_dim=32, activation=torch.tanh)
+    base_save_dir = "/common/results/interpolation/advection"
+
+    # # 1. Neural network
+    # save_dir = os.path.join(base_save_dir, "mlp")
+    # model_mlp = MLP(n_dim=2, hidden_dim=32, activation=torch.tanh)
+    # lr = 1e-3
+    # optimizer = torch.optim.Adam(model_mlp.parameters(), lr=lr)
+    # n_epochs = 10000
+    # plot_every = 100
+    # basis_type_t = "fourier"
+    # basis_type_x = "fourier"
+    # sample_type_t = "standard"
+    # sample_type_x = "standard"
+    # target.train_model(
+    #     model=model_mlp,
+    #     n_epochs=n_epochs,
+    #     optimizer=optimizer,
+    #     t_basis_type=basis_type_t,
+    #     x_basis_type=basis_type_x,
+    #     t_sample_type=sample_type_t,
+    #     x_sample_type=sample_type_x,
+    #     t_n_samples=t_n_samples,
+    #     x_n_samples=x_n_samples,
+    #     eval_t_pts=t_eval,
+    #     eval_x_pts=x_eval,
+    #     plot_every=plot_every,
+    #     save_dir=save_dir,
+    # )
+
+    # 2. Polynomial interpolation
+    save_dir = os.path.join(base_save_dir, "chebyshev")
+    n_t = 41
+    n_x = 41
+    bases = ["fourier", "chebyshev"]
+    domains = target.domain
+    model_cheb_uniform = SpectralInterpolationND(
+        Ns=[n_t, n_x],
+        bases=bases,
+        domains=domains,
+    )
     lr = 1e-3
-    optimizer = torch.optim.Adam(model_mlp.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(model_cheb_uniform.parameters(), lr=lr)
     n_epochs = 10000
     plot_every = 100
     basis_type_t = "fourier"
-    basis_type_x = "fourier"
-    sample_type_t = "uniform"
-    sample_type_x = "uniform"
+    basis_type_x = "chebyshev"
+    sample_type_t = "standard"
+    sample_type_x = "standard"
     target.train_model(
-        model=model_mlp,
+        model=model_cheb_uniform,
         n_epochs=n_epochs,
         optimizer=optimizer,
         t_basis_type=basis_type_t,
@@ -185,40 +261,10 @@ if __name__ == "__main__":
         save_dir=save_dir,
     )
 
-    # # 2. Polynomial interpolation
-    # save_dir = (
-    #     "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/abs_1d/chebyshev"
-    # )
-    # n_x = 41
-    # bases = ["chebyshev"]
-    # domains = target.domain
-    # model_cheb_uniform = SpectralInterpolationND(
-    #     Ns=[n_x],
-    #     bases=bases,
-    #     domains=domains,
-    # )
-    # lr = 1e-3
-    # optimizer = torch.optim.Adam(model_cheb_uniform.parameters(), lr=lr)
-    # n_epochs = 10000
-    # plot_every = 100
-    # basis_type = "chebyshev"
-    # sample_type = "uniform"
-    # target.train_model(
-    #     model=model_cheb_uniform,
-    #     n_epochs=n_epochs,
-    #     optimizer=optimizer,
-    #     basis_type=basis_type,
-    #     sample_type=sample_type,
-    #     n_samples=n_samples,
-    #     x_eval=x_eval,
-    #     plot_every=plot_every,
-    #     save_dir=save_dir,
-    # )
-
-    # # 3. Barycentric rational interpolation
-    # save_dir = (
-    #     "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/abs_1d/rational"
-    # )
+    # TODO: Looks like rational interpolation model still is only 1D?
+    # 3. Barycentric rational interpolation
+    # save_dir = os.path.join(base_save_dir, "rational")
+    # n_t = 21
     # n_x = 21
     # model_rational = RationalInterpolation1D(N=n_x, domain=target.domain[0])
     # lr = 1e-3
@@ -231,10 +277,14 @@ if __name__ == "__main__":
     #     model=model_rational,
     #     n_epochs=n_epochs,
     #     optimizer=optimizer,
-    #     basis_type=basis_type,
-    #     sample_type=sample_type,
-    #     n_samples=n_samples,
-    #     x_eval=x_eval,
+    #     t_basis_type=basis_type_t,
+    #     x_basis_type=basis_type_x,
+    #     t_sample_type=sample_type_t,
+    #     x_sample_type=sample_type_x,
+    #     t_n_samples=t_n_samples,
+    #     x_n_samples=x_n_samples,
+    #     eval_t_pts=t_eval,
+    #     eval_x_pts=x_eval,
     #     plot_every=plot_every,
     #     save_dir=save_dir,
     # )
