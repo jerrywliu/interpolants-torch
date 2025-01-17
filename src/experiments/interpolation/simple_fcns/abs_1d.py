@@ -153,12 +153,14 @@ if __name__ == "__main__":
     n_eval = 200
     x_eval = torch.linspace(target.domain[0][0], target.domain[0][1], n_eval)
 
+    n_epochs = 2_500
+
     # 1. Neural network
-    save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/abs_1d/mlp"
+    save_dir = "/common/results/interpolants-torch/interpolation/abs_1d/mlp"
     model_mlp = MLP(n_dim=1, hidden_dim=32, activation=torch.tanh)
     lr = 1e-3
     optimizer = torch.optim.Adam(model_mlp.parameters(), lr=lr)
-    n_epochs = 10000
+    # n_epochs = 10000
     plot_every = 100
     basis_type = "fourier"
     sample_type = "uniform"
@@ -176,7 +178,7 @@ if __name__ == "__main__":
 
     # 2. Polynomial interpolation
     save_dir = (
-        "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/abs_1d/chebyshev"
+        "/common/results/interpolants-torch/interpolation/abs_1d/chebyshev"
     )
     n_x = 41
     bases = ["chebyshev"]
@@ -188,7 +190,7 @@ if __name__ == "__main__":
     )
     lr = 1e-3
     optimizer = torch.optim.Adam(model_cheb_uniform.parameters(), lr=lr)
-    n_epochs = 10000
+    # n_epochs = 10000
     plot_every = 100
     basis_type = "chebyshev"
     sample_type = "uniform"
@@ -206,13 +208,13 @@ if __name__ == "__main__":
 
     # 3. Barycentric rational interpolation
     save_dir = (
-        "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/abs_1d/rational"
+        "/common/results/interpolants-torch/interpolation/abs_1d/rational"
     )
     n_x = 21
     model_rational = RationalInterpolation1D(N=n_x, domain=target.domain[0])
     lr = 1e-3
     optimizer = torch.optim.Adam(model_rational.parameters(), lr=lr)
-    n_epochs = 20000
+    # n_epochs = 20000
     plot_every = 100
     basis_type = "chebyshev"
     sample_type = "standard"

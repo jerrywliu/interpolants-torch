@@ -91,10 +91,10 @@ class BaseAnalyticalTarget:
             raise ValueError(f"Invalid type: {type}")
 
     def sample_domain(
-        self, n_samples: int, basis: List[str], type: List[str]
+        self, n_samples: List[int], basis: List[str], type: List[str]
     ) -> List[torch.Tensor]:
         return [
-            self.sample_domain_1d(n_samples, dim, basis[dim], type[dim])
+            self.sample_domain_1d(n_samples[dim], dim, basis[dim], type[dim])
             for dim in range(self.n_dims)
         ]
 
