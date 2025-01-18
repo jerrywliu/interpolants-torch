@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from typing import List, Tuple, Callable
+from time import time
 
 
 # TODO JL 1/14/2025: add function to get entries corresponding to IC
@@ -85,6 +86,7 @@ class SpectralInterpolationND(nn.Module):
 
         # Set up diff matrices cache
         self._diff_matrices = [{} for _ in range(self.n_dim)]
+        self._diff_values = {}
 
         # Create mesh grid of nodes
         mesh_args = [self.nodes[d] for d in range(self.n_dim)]
@@ -271,6 +273,56 @@ class SpectralInterpolationND(nn.Module):
         # f_eval_denom = torch.einsum('...ij,...ij->...i', weights_expanded, d_x)  # (B1, B2, B)
 
         return f_eval_num / f_eval_denom
+
+    # def _cheb_interpolate_1d(
+    #     self,
+    #     x_eval: torch.Tensor,
+    #     values: torch.Tensor,
+    #     nodes_std: torch.Tensor,
+    #     to_std: Callable,
+    #     weights: torch.Tensor,
+    #     eps: float = 1e-14,
+    # ):
+    #     """Helper for 1D Chebyshev interpolation along last axis
+    #     Args:
+    #         x_eval: shape (B1, B) - points to evaluate at
+    #         values: shape (B2, B, N) - function values at nodes
+    #         nodes_std: shape (N,) - standard Chebyshev nodes
+    #         to_std: function - maps from physical to standard domain
+    #         weights: shape (N,) - barycentric weights
+    #     Returns:
+    #         shape (B1, B2, B) - interpolated values
+    #     """
+    #     x_eval_standard = to_std(x_eval)  # (B1, B)
+
+    #     # Reshape inputs for broadcasting
+    #     x_eval_expanded = x_eval_standard.unsqueeze(1).unsqueeze(-1)  # (B1, 1, B, 1)
+    #     values_expanded = values.unsqueeze(0)  # (1, B2, B, N)
+    #     nodes_expanded = nodes_std.reshape(1, 1, 1, -1)
+    #     weights_expanded = weights.reshape(1, 1, 1, -1)
+
+    #     # Compute distances
+    #     d_x = x_eval_expanded - nodes_expanded  # (B1, 1, B, N)
+
+    #     # Get sign and magnitude
+    #     abs_diff = torch.abs(d_x)
+    #     signs = torch.sign(d_x)
+
+    #     # Replace small values with eps while preserving sign
+    #     d_x = signs * torch.max(abs_diff, torch.tensor(eps, device=d_x.device))
+
+    #     # Use reciprocal for barycentric weights
+    #     d_x_reciprocal = 1.0 / d_x
+
+    #     # Compute weighted sum along last axis
+    #     f_eval_num = torch.sum(
+    #         values_expanded * d_x_reciprocal * weights_expanded, dim=-1
+    #     )  # (B1, B2, B)
+    #     f_eval_denom = torch.sum(
+    #         d_x_reciprocal * weights_expanded, dim=-1
+    #     )  # (B1, B2, B)
+
+    #     return f_eval_num / f_eval_denom
 
     def _cheb_interpolate_1ofnd(
         self,
@@ -485,6 +537,11 @@ class SpectralInterpolationND(nn.Module):
         if all(ki == 0 for ki in k):
             return self.values
 
+        # Check cache
+        k_key = tuple(k)
+        if k_key in self._diff_values:
+            return self._diff_values[k_key].clone()
+
         # Get mixed derivative matrix
         Dk = self.derivative_matrix(k)
 
@@ -495,6 +552,9 @@ class SpectralInterpolationND(nn.Module):
 
         # Reshape back to grid shape
         dk_nodes = dk_nodes.reshape(*self.values.shape)
+
+        # Cache result
+        self._diff_values[k_key] = dk_nodes.clone()
 
         return dk_nodes
 
@@ -516,4 +576,5 @@ class SpectralInterpolationND(nn.Module):
         dk_nodes = self._derivative_interpolant(k)
 
         # Interpolate to evaluation points
-        return self.interpolate(x_eval, values=dk_nodes)
+        dk_eval = self.interpolate(x_eval, values=dk_nodes)
+        return dk_eval

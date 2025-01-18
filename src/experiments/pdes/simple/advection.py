@@ -54,11 +54,19 @@ class Advection(BasePDE):
 
         if isinstance(model, SpectralInterpolationND):
             # PDE
+            time_start = time()
             u = model.interpolate(pde_nodes)
+            print(f"Time to interpolate: {time() - time_start}")
+            time_start = time()
             u_t = model.derivative(pde_nodes, k=(1, 0))  # (N_t, N_x)
+            print(f"Time to compute derivatives: {time() - time_start}")
+            time_start = time()
             u_x = model.derivative(pde_nodes, k=(0, 1))  # (N_t, N_x)
+            print(f"Time to compute derivatives: {time() - time_start}")
             # IC
+            time_start = time()
             u_ic = model.interpolate(ic_nodes)[0]  # (N_ic)
+            print(f"Time to interpolate IC: {time() - time_start}")
         else:
             # PDE
             u = model(pde_nodes).reshape(n_t, n_x)

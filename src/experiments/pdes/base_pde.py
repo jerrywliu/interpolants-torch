@@ -133,7 +133,7 @@ class BasePDE:
             loss, pde_loss, ic_loss = self.get_pde_loss(
                 model, pde_nodes, ic_nodes, ic_weight
             )
-            loss.backward()
+            loss.backward(retain_graph=True)
             optimizer.step()
 
             # Evaluate solution
@@ -167,6 +167,90 @@ class BasePDE:
                     save_path=os.path.join(
                         save_dir, f"{self.name}_solution_{epoch}.png"
                     ),
+                )
+
+                # Save history
+                torch.save(history, os.path.join(save_dir, "history.pth"))
+
+        return history
+
+    def train_model_lbfgs(
+        self,
+        model: nn.Module,
+        max_iter: int,
+        optimizer: torch.optim.LBFGS,
+        pde_sampler: Callable,
+        ic_sampler: Callable,
+        ic_weight: float,
+        eval_sampler: Callable,
+        eval_metrics: List[Callable],
+        plot_every: int = 10,
+        save_dir: str = None,
+    ):
+        # Training history
+        history = {
+            "loss": [],
+            "train_pde_loss": [],
+            "train_ic_loss": [],
+            "eval_pde_loss": [],
+        }
+        for eval_metric in eval_metrics:
+            history[f"eval_{eval_metric.__name__}"] = []
+
+        # Sample points once since L-BFGS works better with fixed points
+        pde_nodes = pde_sampler()
+        ic_nodes = ic_sampler()
+        eval_nodes = eval_sampler()
+
+        print("Training model with L-BFGS...")
+        start_time = time()
+
+        # Define closure for L-BFGS
+        def closure():
+            optimizer.zero_grad()
+            loss, pde_loss, ic_loss = self.get_pde_loss(
+                model, pde_nodes, ic_nodes, ic_weight
+            )
+            loss.backward()
+            return loss
+
+        # Training loop
+        for i in tqdm(range(max_iter)):
+            # Optimize
+            loss = optimizer.step(closure)
+
+            # Evaluate solution
+            with torch.no_grad():
+                u_eval = model.interpolate(eval_nodes)
+                u_true = self.get_solution(eval_nodes)
+                for eval_metric in eval_metrics:
+                    eval_metric_value = eval_metric(u_eval, u_true)
+                    history[f"eval_{eval_metric.__name__}"].append(eval_metric_value)
+                # Get losses for history
+                total_loss, pde_loss, ic_loss = self.get_pde_loss(
+                    model, pde_nodes, ic_nodes, ic_weight
+                )
+                _, eval_pde_loss, _ = self.get_pde_loss(
+                    model, eval_nodes, ic_nodes, ic_weight
+                )
+
+            # Update history
+            history["loss"].append(total_loss.item())
+            history["train_pde_loss"].append(pde_loss.item())
+            history["train_ic_loss"].append(ic_loss.item())
+            history["eval_pde_loss"].append(eval_pde_loss.item())
+
+            # Print and plot progress
+            if (i + 1) % plot_every == 0:
+                current_time = time() - start_time
+                print(f"Iteration {i + 1} completed in {current_time:.2f} seconds")
+                print(f"PDE loss: {history['train_pde_loss'][-1]:1.3e}")
+                print(f"IC loss: {history['train_ic_loss'][-1]:1.3e}")
+                print(f"Evaluation L2 error: {history['eval_l2_error'][-1]:1.3e}")
+                self.plot_solution(
+                    eval_nodes,
+                    u_eval,
+                    save_path=os.path.join(save_dir, f"{self.name}_solution_{i}.png"),
                 )
 
                 # Save history

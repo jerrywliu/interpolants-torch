@@ -243,6 +243,73 @@ class SpectralInterpolationND(nn.Module):
 
         return D
 
+    # def _cheb_interpolate_1d(
+    #     self,
+    #     x_eval: torch.Tensor,
+    #     values: torch.Tensor,
+    #     nodes_std: torch.Tensor,
+    #     to_std: Callable,
+    #     weights: torch.Tensor,
+    #     eps: float = 1e-14,
+    # ):
+    #     """Helper for 1D Chebyshev interpolation along last axis
+
+    #     Args:
+    #         x_eval: shape (B1, B) - points to evaluate at
+    #         values: shape (B2, B, N) - function values at nodes
+    #         nodes_std: shape (N,) - standard Chebyshev nodes
+    #         to_std: function - maps from physical to standard domain
+    #         weights: shape (N,) - barycentric weights
+
+    #     Returns:
+    #         shape (B1, B2, B) - interpolated values
+    #     """
+    #     x_eval_standard = to_std(x_eval)  # (B1, B)
+
+    #     # Reshape inputs for broadcasting:
+    #     # x_eval: (B1, 1, B, 1)
+    #     # values: (1, B2, B, N)
+    #     # nodes: (1, 1, 1, N)
+    #     # weights: (1, 1, 1, N)
+
+    #     # # Implementation 1
+    #     # time_start = time()
+    #     x_eval_expanded = x_eval_standard.unsqueeze(1).unsqueeze(-1)  # (B1, 1, B, 1)
+    #     values_expanded = values.unsqueeze(0)  # (1, B2, B, N)
+    #     nodes_expanded = nodes_std.reshape(1, 1, 1, -1)
+    #     weights_expanded = weights.reshape(1, 1, 1, -1)
+    #     # print(f"Version 1: {time() - time_start}")
+
+    #     # # Implementation 2
+    #     # time_start = time()
+    #     # x_eval_expanded, nodes_expanded, values_expanded, weights_expanded = torch.broadcast_tensors(
+    #     #     x_eval_standard[:, None, :, None], nodes_std[None, None, None, :], values[None, ...], weights[None, None, None, :]
+    #     # )
+    #     # print(f"Version 2: {time() - time_start}")
+
+    #     # Compute distances - result is (B1, B2, B, N)
+    #     d_x = x_eval_expanded - nodes_expanded
+
+    #     small_diff = torch.abs(d_x) < eps
+    #     small_diff_max = torch.max(small_diff, dim=-1, keepdim=True).values
+
+    #     d_x = torch.where(small_diff_max, torch.zeros_like(d_x), 1.0 / d_x)
+    #     # d_x[small_diff] = 1
+    #     d_x = torch.where(small_diff, torch.ones_like(d_x), d_x)
+
+    #     # Compute weighted sum along last axis
+    #     # # Implementation 1
+    #     f_eval_num = torch.sum(
+    #         values_expanded * d_x * weights_expanded, dim=-1
+    #     )  # (B1, B2, B)
+    #     f_eval_denom = torch.sum(d_x * weights_expanded, dim=-1)  # (B1, B2, B)
+
+    #     # # Implementation 2
+    #     # f_eval_num = torch.einsum('...ij,...ij->...i', values_expanded * weights_expanded, d_x)  # (B1, B2, B)
+    #     # f_eval_denom = torch.einsum('...ij,...ij->...i', weights_expanded, d_x)  # (B1, B2, B)
+
+    #     return f_eval_num / f_eval_denom
+
     def _cheb_interpolate_1d(
         self,
         x_eval: torch.Tensor,
@@ -253,61 +320,42 @@ class SpectralInterpolationND(nn.Module):
         eps: float = 1e-14,
     ):
         """Helper for 1D Chebyshev interpolation along last axis
-
         Args:
             x_eval: shape (B1, B) - points to evaluate at
             values: shape (B2, B, N) - function values at nodes
             nodes_std: shape (N,) - standard Chebyshev nodes
             to_std: function - maps from physical to standard domain
             weights: shape (N,) - barycentric weights
-
         Returns:
             shape (B1, B2, B) - interpolated values
         """
         x_eval_standard = to_std(x_eval)  # (B1, B)
-
-        # Reshape inputs for broadcasting:
-        # x_eval: (B1, 1, B, 1)
-        # values: (1, B2, B, N)
-        # nodes: (1, 1, 1, N)
-        # weights: (1, 1, 1, N)
-
-        # # Implementation 1
-        # time_start = time()
+        
+        # Reshape inputs for broadcasting
         x_eval_expanded = x_eval_standard.unsqueeze(1).unsqueeze(-1)  # (B1, 1, B, 1)
         values_expanded = values.unsqueeze(0)  # (1, B2, B, N)
         nodes_expanded = nodes_std.reshape(1, 1, 1, -1)
         weights_expanded = weights.reshape(1, 1, 1, -1)
-        # print(f"Version 1: {time() - time_start}")
-
-        # # Implementation 2
-        # time_start = time()
-        # x_eval_expanded, nodes_expanded, values_expanded, weights_expanded = torch.broadcast_tensors(
-        #     x_eval_standard[:, None, :, None], nodes_std[None, None, None, :], values[None, ...], weights[None, None, None, :]
-        # )
-        # print(f"Version 2: {time() - time_start}")
-
-        # Compute distances - result is (B1, B2, B, N)
-        d_x = x_eval_expanded - nodes_expanded
-
-        small_diff = torch.abs(d_x) < eps
-        small_diff_max = torch.max(small_diff, dim=-1, keepdim=True).values
-
-        d_x = torch.where(small_diff_max, torch.zeros_like(d_x), 1.0 / d_x)
-        # d_x[small_diff] = 1
-        d_x = torch.where(small_diff, torch.ones_like(d_x), d_x)
-
+        
+        # Compute distances
+        d_x = x_eval_expanded - nodes_expanded  # (B1, 1, B, N)
+        
+        # Get sign and magnitude
+        abs_diff = torch.abs(d_x)
+        signs = torch.sign(d_x)
+        
+        # Replace small values with eps while preserving sign
+        d_x = signs * torch.max(abs_diff, torch.tensor(eps, device=d_x.device))
+        
+        # Use reciprocal for barycentric weights
+        d_x_reciprocal = 1.0 / d_x
+        
         # Compute weighted sum along last axis
-        # # Implementation 1
         f_eval_num = torch.sum(
-            values_expanded * d_x * weights_expanded, dim=-1
+            values_expanded * d_x_reciprocal * weights_expanded, dim=-1
         )  # (B1, B2, B)
-        f_eval_denom = torch.sum(d_x * weights_expanded, dim=-1)  # (B1, B2, B)
-
-        # # Implementation 2
-        # f_eval_num = torch.einsum('...ij,...ij->...i', values_expanded * weights_expanded, d_x)  # (B1, B2, B)
-        # f_eval_denom = torch.einsum('...ij,...ij->...i', weights_expanded, d_x)  # (B1, B2, B)
-
+        f_eval_denom = torch.sum(d_x_reciprocal * weights_expanded, dim=-1)  # (B1, B2, B)
+        
         return f_eval_num / f_eval_denom
 
     def _cheb_interpolate_1ofnd(
@@ -557,6 +605,120 @@ class SpectralInterpolationND(nn.Module):
         return self.interpolate(x_eval, values=dk_nodes)
 
 
+
+# %% [markdown]
+# ## Sanity check: does the new differentiable 1D interpolate work?
+
+# %%
+def test_interpolation(eps_values=[1e-14, 1e-10, 1e-6]):
+    """Test the differentiable interpolation implementation"""
+    
+    # Setup problem
+    target = Sine1DTarget()
+    n_x = 21
+    n_eval = 200
+    
+    # Create model
+    model = SpectralInterpolationND(
+        Ns=[n_x],
+        bases=['chebyshev'],
+        domains=target.domain
+    )
+    
+    # Set the function values at nodes
+    model.values.data = target.get_function(model.nodes[0])
+    
+    # Create evaluation points including points very close to nodes
+    x_eval_base = torch.linspace(target.domain[0][0], target.domain[0][1], n_eval)
+    # Add points very close to nodes
+    # delta = 1e-10
+    # delta = 1e-14
+    delta = 0
+    x_near_nodes = model.nodes[0].unsqueeze(1) + torch.tensor([-delta, delta]).reshape(1, -1)
+    x_near_nodes = x_near_nodes.reshape(-1)
+    x_eval = torch.cat([x_eval_base, x_near_nodes])
+    # x_eval = x_eval.sort()[0]
+    
+    results = {}
+        
+    # Create figure for comparison
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    
+    # Get true values
+    true_values = target.get_function(x_eval)
+    true_deriv = target.derivative(x_eval)
+    
+    # Test interpolation
+    interp_values = model([x_eval])
+    value_error = torch.abs(interp_values - true_values)
+    
+    # Plot function values
+    axes[0,0].plot(x_eval.detach(), true_values.detach(), 'k-', label='True')
+    axes[0,0].plot(x_eval.detach(), interp_values.detach(), 'b--', label='Interpolated')
+    axes[0,0].plot(model.nodes[0].detach(), model.values.detach(), 'ko', label='Nodes')
+    axes[0,0].set_title('Function Values')
+    axes[0,0].legend()
+    axes[0,0].grid(True)
+    
+    # Plot value errors
+    axes[0,1].semilogy(x_eval.detach(), value_error.detach(), 'b-', label='Error')
+    axes[0,1].semilogy(x_near_nodes.detach(), value_error[x_eval_base.shape[0]:].detach(), 'o', color='red')
+    axes[0,1].set_title('Function Value Errors')
+    axes[0,1].legend()
+    axes[0,1].grid(True)
+    
+    # Test derivatives
+    x_eval_grad = x_eval.clone().requires_grad_(True)
+    try:
+        values = model([x_eval_grad])
+        autograd_deriv = torch.autograd.grad(values.sum(), x_eval_grad)[0]
+        deriv_error = torch.abs(autograd_deriv - true_deriv)
+        deriv_success = True
+        
+        # Plot derivatives
+        axes[1,0].plot(x_eval.detach(), true_deriv.detach(), 'k-', label='True')
+        axes[1,0].plot(x_eval.detach(), autograd_deriv.detach(), 'b--', label='Autograd')
+        axes[1,0].set_title('Derivatives')
+        axes[1,0].legend()
+        axes[1,0].grid(True)
+        
+        # Plot derivative errors
+        axes[1,1].semilogy(x_eval.detach(), deriv_error.detach(), 'b-', label='Error')
+        axes[1,1].semilogy(x_near_nodes.detach(), deriv_error[x_eval_base.shape[0]:].detach(), 'o', color='red')
+        axes[1,1].set_title('Derivative Errors')
+        axes[1,1].legend()
+        axes[1,1].grid(True)
+        
+    except Exception as e:
+        print(f"Derivative computation failed: {e}")
+        deriv_success = False
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Store results
+    results[eps] = {
+        'value_l2_error': torch.mean(value_error**2).sqrt().item(),
+        'value_max_error': torch.max(value_error).item(),
+        'deriv_success': deriv_success,
+    }
+    if deriv_success:
+        results[eps].update({
+            'deriv_l2_error': torch.mean(deriv_error**2).sqrt().item(),
+            'deriv_max_error': torch.max(deriv_error).item(),
+        })
+    
+    # Print summary
+    print("\nResults Summary:")
+    for eps, res in results.items():
+        print(f"\nEpsilon = {eps}")
+        for key, val in res.items():
+            print(f"  {key}: {val}")
+    
+    return results
+
+if __name__ == "__main__":
+    results = test_interpolation()
 
 # %% [markdown]
 # ## Sanity check: do the differentiable interpolants match the original?
