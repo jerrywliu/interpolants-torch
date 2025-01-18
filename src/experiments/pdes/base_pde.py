@@ -133,7 +133,7 @@ class BasePDE:
             loss, pde_loss, ic_loss = self.get_pde_loss(
                 model, pde_nodes, ic_nodes, ic_weight
             )
-            loss.backward(retain_graph=True)
+            loss.backward()
             optimizer.step()
 
             # Evaluate solution
