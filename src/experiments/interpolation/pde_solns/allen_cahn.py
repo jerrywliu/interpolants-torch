@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 from time import time
 
 import numpy as np
+import scipy.io
 
 import torch
 import torch.nn as nn
@@ -31,39 +32,40 @@ def make_grid(t_pts, x_pts):
     return grid.reshape(-1, 2)
 
 
-class AdvectionTarget(BaseAnalyticalTarget):
+class AllenCahnTarget(BaseAnalyticalTarget):
     def __init__(self):
-        T = 2.0
-        L = 2 * np.pi
-        c = 50
+        t_range = (0.0, 1.0)
+        x_range = (-1.0, 1.0)
 
-        def advection_forward(inputs):
-            t = inputs[:, 0]
-            x = inputs[:, 1]
-            return torch.sin(torch.remainder(x - c * t, L))
+        self.true_fn_vals, self.t_vals, self.x_vals, self.full_grid = (
+            self.load_allen_cahn_dataset()
+        )
 
         super().__init__(
-            "adv",
-            f=advection_forward,
-            domain=[(0.0, T), (0.0, L)],
+            "allen-cahn",
+            f=lambda x: 0.0,  # Dummy function.
+            domain=[t_range, x_range],
             derivative=lambda x: 0.0,  # Dummy function.
             second_derivative=lambda x: 0.0,  # Dummy function.
         )
 
+    def load_allen_cahn_dataset(self):
+        data = scipy.io.loadmat(
+            "src/experiments/interpolation/pde_solns/allen-cahn-data/allen_cahn.mat"
+        )
+        u_ref = torch.as_tensor(data["usol"])
+        t_star = torch.as_tensor(data["t"].flatten())
+        x_star = torch.as_tensor(data["x"].flatten())
+        full_grid = make_grid(t_star, x_star)
+
+        return u_ref, t_star, x_star, full_grid
+
     def plot_comparison(
         self,
-        train_grid,
-        f_train_pred,
-        f_train_true,
-        eval_grid,
         f_eval_pred,
         f_eval_true,
         save_path,
     ):
-        # We assume that eval_grid is always uniformly, equally spaced. So we
-        # plot the heatmaps on eval_grid, since train_grid may correspond to for
-        # eg chebyshev grid.
-        
         f_eval_pred = f_eval_pred.detach().cpu().numpy()
         f_eval_true = f_eval_true.detach().cpu().numpy()
 
@@ -93,13 +95,32 @@ class AdvectionTarget(BaseAnalyticalTarget):
         x_basis_type: str,  # "chebyshev" or "fourier"
         t_sample_type: str,  # standard or uniform
         x_sample_type: str,  # standard or uniform
-        t_n_samples: int,
-        x_n_samples: int,
-        eval_t_pts: torch.Tensor,
-        eval_x_pts: torch.Tensor,
         plot_every: int = 100,
         save_dir: str = None,
     ):
+        assert t_basis_type == "fourier" and x_basis_type == "chebyshev", (
+            "Allen-cahn data was generated with fourier basis for t and "
+            + "chebyshev for x."
+        )
+
+        assert t_sample_type == "standard" and x_sample_type == "standard", (
+            "Allen-cahn data was generated with standard sample type."
+        )
+
+        # Train / eval split.
+
+        train_t_vals = self.t_vals[0::2]
+        eval_t_vals = self.t_vals[1::2]
+
+        train_x_vals = self.x_vals[0::2]
+        eval_x_vals = self.x_vals[1::2]
+
+        # train_grid = self.full_grid[0::2, 0::2]
+        # eval_grid = self.full_grid[1::2, 1::2]
+
+        f_train_true = torch.as_tensor(self.true_fn_vals[0::2, 0::2])
+        f_eval_true = torch.as_tensor(self.true_fn_vals[1::2, 1::2])
+
         # Training history
         history = {
             "loss": [],
@@ -108,30 +129,10 @@ class AdvectionTarget(BaseAnalyticalTarget):
         }
         loss_fn = nn.MSELoss()
 
-        eval_grid = make_grid(eval_t_pts, eval_x_pts)
-
         print("Training model...")
         start_time = time()
         for epoch in tqdm(range(n_epochs)):
-            # Sample points
-            sampled_pts_per_dim = self.sample_domain(
-                n_samples=[t_n_samples, x_n_samples],
-                # dim=0,
-                basis=[t_basis_type, x_basis_type],
-                type=[t_sample_type, x_sample_type],
-            )
-
-            # # We sort here so that 
-            # for i, sampled_pts in enumerate(sampled_pts_per_dim):
-            #     sampled_pts_per_dim[i] = torch.sort(sampled_pts)[0]
-
-            train_grid = make_grid(sampled_pts_per_dim[0], sampled_pts_per_dim[1])
-
-            # f_train_pred = model([train_grid])
-            f_train_pred = model(sampled_pts_per_dim)
-            f_train_true = self.get_function(train_grid).reshape(
-                t_n_samples, x_n_samples
-            )
+            f_train_pred = model([train_t_vals, train_x_vals])
 
             # Train step
             optimizer.zero_grad()
@@ -140,11 +141,7 @@ class AdvectionTarget(BaseAnalyticalTarget):
             optimizer.step()
 
             # Evaluate solution
-            f_eval_pred = model([eval_t_pts, eval_x_pts]).detach()
-            f_eval_true = self.get_function(eval_grid).reshape(
-                eval_t_pts.shape[0], eval_x_pts.shape[0]
-            )
-
+            f_eval_pred = model([eval_t_vals, eval_x_vals]).detach()
             eval_l2_error = torch.mean((f_eval_pred - f_eval_true) ** 2)
             eval_max_error = torch.max(torch.abs(f_eval_pred - f_eval_true))
 
@@ -159,13 +156,9 @@ class AdvectionTarget(BaseAnalyticalTarget):
                 print(f"Epoch {epoch + 1} completed in {current_time:.2f} seconds")
                 print(f"Evaluation L2 error: {history['eval_l2_error'][-1]:1.3e}")
                 self.plot_comparison(
-                    train_grid,
-                    f_train_pred,
-                    f_train_true,
-                    eval_grid,
                     f_eval_pred,
                     f_eval_true,
-                    save_path=os.path.join(save_dir, f"adv_{epoch}.png"),
+                    save_path=os.path.join(save_dir, f"allen-cahn_{epoch}.png"),
                 )
 
         # Plot loss history
@@ -187,31 +180,54 @@ if __name__ == "__main__":
     torch.set_default_dtype(torch.float64)
 
     # Problem setup
-    target = AdvectionTarget()
-    t_n_samples = 200
-    x_n_samples = 50
+    target = AllenCahnTarget()
+    base_save_dir = "/common/results/interpolation/allen-cahn"
 
-    t_n_samples_eval = 100
-    x_n_samples_eval = 100
+    # 1. Neural network
+    save_dir = os.path.join(base_save_dir, "mlp")
+    model_mlp = MLP(n_dim=2, hidden_dim=32, activation=torch.tanh)
+    lr = 1e-3
+    optimizer = torch.optim.Adam(model_mlp.parameters(), lr=lr)
+    n_epochs = 10000
+    plot_every = 100
+    basis_type_t = "fourier"
+    basis_type_x = "chebyshev"
+    sample_type_t = "standard"
+    sample_type_x = "standard"
 
-    t_eval = torch.linspace(target.domain[0][0], target.domain[0][1], t_n_samples_eval)
-    x_eval = torch.linspace(target.domain[1][0], target.domain[1][1], x_n_samples_eval)
+    target.train_model(
+        model=model_mlp,
+        n_epochs=n_epochs,
+        optimizer=optimizer,
+        t_basis_type=basis_type_t,
+        x_basis_type=basis_type_x,
+        t_sample_type=sample_type_t,
+        x_sample_type=sample_type_x,
+        plot_every=plot_every,
+        save_dir=save_dir,
+    )
 
-    base_save_dir = "/common/results/interpolation/advection"
-
-    # # 1. Neural network
-    # save_dir = os.path.join(base_save_dir, "mlp")
-    # model_mlp = MLP(n_dim=2, hidden_dim=32, activation=torch.tanh)
+    # # 2. Polynomial interpolation
+    # save_dir = os.path.join(base_save_dir, "chebyshev")
+    # n_t = 41
+    # n_x = 41
+    # bases = ["fourier", "chebyshev"]
+    # domains = target.domain
+    # model_cheb_uniform = SpectralInterpolationND(
+    #     Ns=[n_t, n_x],
+    #     bases=bases,
+    #     domains=domains,
+    # )
     # lr = 1e-3
-    # optimizer = torch.optim.Adam(model_mlp.parameters(), lr=lr)
+    # optimizer = torch.optim.Adam(model_cheb_uniform.parameters(), lr=lr)
     # n_epochs = 10000
     # plot_every = 100
     # basis_type_t = "fourier"
-    # basis_type_x = "fourier"
+    # basis_type_x = "chebyshev"
     # sample_type_t = "standard"
     # sample_type_x = "standard"
     # target.train_model(
-    #     model=model_mlp,
+    #     model=model_cheb_uniform,
     #     n_epochs=n_epochs,
     #     optimizer=optimizer,
     #     t_basis_type=basis_type_t,
@@ -225,41 +241,6 @@ if __name__ == "__main__":
     #     plot_every=plot_every,
     #     save_dir=save_dir,
     # )
-
-    # 2. Polynomial interpolation
-    save_dir = os.path.join(base_save_dir, "chebyshev")
-    n_t = 41
-    n_x = 41
-    bases = ["fourier", "chebyshev"]
-    domains = target.domain
-    model_cheb_uniform = SpectralInterpolationND(
-        Ns=[n_t, n_x],
-        bases=bases,
-        domains=domains,
-    )
-    lr = 1e-3
-    optimizer = torch.optim.Adam(model_cheb_uniform.parameters(), lr=lr)
-    n_epochs = 10000
-    plot_every = 100
-    basis_type_t = "fourier"
-    basis_type_x = "chebyshev"
-    sample_type_t = "standard"
-    sample_type_x = "standard"
-    target.train_model(
-        model=model_cheb_uniform,
-        n_epochs=n_epochs,
-        optimizer=optimizer,
-        t_basis_type=basis_type_t,
-        x_basis_type=basis_type_x,
-        t_sample_type=sample_type_t,
-        x_sample_type=sample_type_x,
-        t_n_samples=t_n_samples,
-        x_n_samples=x_n_samples,
-        eval_t_pts=t_eval,
-        eval_x_pts=x_eval,
-        plot_every=plot_every,
-        save_dir=save_dir,
-    )
 
     # TODO: Looks like rational interpolation model still is only 1D?
     # 3. Barycentric rational interpolation
