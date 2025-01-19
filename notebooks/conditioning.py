@@ -74,9 +74,156 @@ x_true.shape
 U, S, Vh = torch.linalg.svd(A, full_matrices=False)
 print(f"Condition number: {S[0]/S[-1]}")
 
+# %% [markdown]
+# ## Check the residual of the least squares soln
+
+# %%
+# Solve using lstsq
+x = torch.linalg.lstsq(A, b).solution
+
+# Compute residual
+residual = torch.norm(A @ x - b)
+print(f"Residual norm: {residual:.2e}")
+
+# Check rank
+rank = torch.linalg.matrix_rank(A)
+print(f"Matrix rank: {rank}")
+print(f"Matrix shape: {A.shape}")
+
+# Also check condition number via SVD
+U, S, Vh = torch.linalg.svd(A, full_matrices=False)
+print(f"Condition number: {S[0]/S[-1]:.2e}")
+print(f"Singular values range: [{S[-1]:.2e}, {S[0]:.2e}]")
+
+# %%
+# Adjust A's conditioning to be a lot better
+# S_scaled = torch.sqrt(S)  # Less aggressive 
+S_scaled = torch.log1p(S)  # More aggressive
+S_scaled = S_scaled / S_scaled[0] * S[0]  # Preserve largest singular value
+print(f"Scaled condition number: {S_scaled[0]/S_scaled[-1]:.2e}")
+
+# Reconstruct matrix with modified spectrum
+A_better = U @ torch.diag(S_scaled) @ Vh
+b_better = A_better @ x
+
+# Solve using lstsq
+x_better = torch.linalg.lstsq(A_better, b_better).solution
+
+# Compute residual
+residual = torch.norm(A_better @ x_better - b_better)
+print(f"Residual norm: {residual:.2e}")
+
+# %% [markdown]
+# ## Simple first-order methods
+
 # %%
 import torch
-from torch.optim import Adam, LBFGS
+import torch.nn as nn
+
+def train_ls(A, b, M=None, n_steps=1000, lr=1e-3, optimizer='adam', tol=1e-12, 
+             lr_drop_steps=1000, lr_drop_factor=0.9):
+    """Solve Ax = b with first-order methods."""
+    import matplotlib.pyplot as plt
+    
+    # Initialize parameters
+    n = A.shape[1] if M is None else M.shape[1]
+    y = nn.Parameter(torch.randn(n) * 0.01)
+    
+    # Setup optimizer
+    if optimizer == 'adam':
+        opt = torch.optim.Adam([y], lr=lr)
+    else:  # SGD
+        opt = torch.optim.SGD([y], lr=lr)
+    
+    # Training loop
+    prev_loss = float('inf')
+    losses = []  # Track losses for plotting
+    lrs = []     # Track learning rates
+    
+    for step in range(n_steps):
+        # Drop learning rate periodically
+        if step > 0 and step % lr_drop_steps == 0:
+            for param_group in opt.param_groups:
+                param_group['lr'] *= lr_drop_factor
+        
+        opt.zero_grad()
+        
+        # Forward pass
+        x = y if M is None else M @ y
+        loss = 0.5 * torch.sum((A @ x - b)**2)
+        
+        # Store metrics
+        losses.append(loss.item())
+        lrs.append(opt.param_groups[0]['lr'])
+        
+        # Backward pass
+        loss.backward()
+        opt.step()
+        
+        # Check convergence
+        if abs(prev_loss - loss.item()) < tol:
+            print(f"Converged at step {step}")
+            break
+        prev_loss = loss.item()
+        
+        if step % 100 == 0:
+            print(f"Step {step}, Loss: {loss.item():.3e}, LR: {opt.param_groups[0]['lr']:.3e}")
+    
+    # Plot training curves
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+    
+    # Loss plot (log scale)
+    ax1.semilogy(losses)
+    ax1.set_xlabel('Steps')
+    ax1.set_ylabel('Loss')
+    ax1.set_title('Training Loss')
+    ax1.grid(True)
+    
+    # Learning rate plot (log scale)
+    ax2.semilogy(lrs)
+    ax2.set_xlabel('Steps')
+    ax2.set_ylabel('Learning Rate')
+    ax2.set_title('Learning Rate Schedule')
+    ax2.grid(True)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Return solution
+    with torch.no_grad():
+        x = y if M is None else M @ y
+    return x
+
+
+# %%
+# Solve using lstsq
+x = torch.linalg.lstsq(A, b).solution
+
+# Compute residual
+residual = torch.norm(A @ x - b)
+print(f"Residual norm: {residual:.2e}")
+
+# %%
+# Without preconditioning
+x = train_ls(A, b, lr=1e0, optimizer='adam', n_steps=10000, lr_drop_steps=1000, lr_drop_factor=0.9)
+# x = train_ls(A_better, b_better, lr=1e-2, optimizer='adam', n_steps=10000)
+
+# # Create rectangular "identity" matrix 
+# m, n = A_better.shape  # m=1680, n=1640
+# A_best = torch.zeros(m, n)
+# min_dim = min(m, n)  # 1640
+# A_best[:min_dim, :min_dim] = torch.eye(min_dim)
+# x = train_ls(A_best, b, lr=1e-3, optimizer='adam', n_steps=100000)
+
+# # With preconditioning
+# x = train_ls(A, b, M=M, lr=1e-2, optimizer='sgd')
+
+# %% [markdown]
+# ## Dev
+
+# %%
+import torch
+from torch.optim import Adam, LBFGS, SGD
 import time
 
 class PreconditionedLinearSystem:
@@ -226,6 +373,11 @@ def solve_preconditioned_system(A, b, method='adam', precondition='svd',
             optimizer = Adam([y], lr=0.1, betas=(0.5, 0.999), eps=1e-8)
         else:
             optimizer = Adam([y], lr=0.01, betas=(0.9, 0.999), eps=1e-8)
+    elif method.lower() == 'sgd':
+        if precondition == 'svd':
+            optimizer = SGD([y], lr=1e-2)
+        else:
+            optimizer = Adam([y], lr=1e-2)
     else:  # L-BFGS
         optimizer = LBFGS([y], lr=1, max_iter=20, history_size=100,
                          line_search_fn='strong_wolfe')
@@ -292,14 +444,14 @@ def solve_preconditioned_system(A, b, method='adam', precondition='svd',
 
 # %%
 # Solve with and without preconditioning
-methods = ['adam']
-preconditions = ['none', 'jacobi']
+methods = ['adam', 'sgd']
+preconditions = ['jacobi']
 
 for method in methods:
     for precond in preconditions:
         print(f"\nSolving with {method.upper()} ({precond} preconditioning):")
         x_sol, info = solve_preconditioned_system(
-            A, b, method=method, precondition=precond, max_iter=10000)
+            A, b, method=method, precondition=precond, max_iter=2500)
         
         print(f"Final Residual: {info['final_residual']:.2e}")
         print(f"Time: {info['times'][-1]:.2f} seconds")

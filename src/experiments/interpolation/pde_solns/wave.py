@@ -84,9 +84,12 @@ if __name__ == "__main__":
     save_dir = (
         "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/wave/sanity_check"
     )
-    for n_t in [21, 41, 81, 161, 321]:
+    for n_t in [81, 161, 201, 321, 641, 1281, 2001]:
         n_x = n_t - 1
+        print(f"Interpolating wave equation solution with n_t={n_t} and n_x={n_x}")
+        # n_x = n_t
         bases = ["chebyshev", "fourier"]
+        # bases = ["chebyshev", "chebyshev"]
         model = SpectralInterpolationND(
             Ns=[n_t, n_x],
             bases=bases,
@@ -98,7 +101,7 @@ if __name__ == "__main__":
         model.values.data = data
 
         # Evaluation setup
-        n_eval = 200
+        n_eval = 197
         t_eval = torch.linspace(0, 1, n_eval)
         x_eval = torch.linspace(0, 1, n_eval + 1)[:-1]
 

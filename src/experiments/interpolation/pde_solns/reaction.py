@@ -90,9 +90,11 @@ if __name__ == "__main__":
 
         # Sanity check: ensure that the interpolation model is expressive enough to fit the target
         save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/reaction/sanity_check"
-        for n_t in [21, 41, 81, 161, 321]:
-            n_x = n_t - 1
-            bases = ["chebyshev", "fourier"]
+        for n_t in [21, 41, 81, 161, 321, 641, 1281, 2001]:
+            # n_x = n_t - 1
+            n_x = n_t
+            # bases = ["chebyshev", "fourier"]
+            bases = ["chebyshev", "chebyshev"]
             model = SpectralInterpolationND(
                 Ns=[n_t, n_x],
                 bases=bases,
