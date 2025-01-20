@@ -11,32 +11,23 @@ from src.models.interpolant_nd import SpectralInterpolationND
 from src.utils.metrics import l2_error, max_error, l2_relative_error
 
 """
-1D Advection equation:
-u_t + c * u_x = 0
-t in [0, t_final] (default: t_final = 1)
-x in [0, 2*pi]
-u(t=0, x) = u_0(x) (default: u_0(x) = sin(x))
-u(t, x=0) = u(t, x=2*pi)
-
-Solution:
-u(t, x) = u_0(x - c*t)
+1D Burgers equation:
+u_t + u * u_x - nu * u_xx = 0
+t in [0, 1]
+x in [-1, 1]
+u(t=0, x) = -sin(pi*x)
+u(t, x=-1) = u(t, x=1) = 0
 """
 
 
-class Advection(BasePDE):
-    def __init__(self, c: float, t_final: float = 1, u_0: Callable = None):
-        super().__init__("advection", [(0, 1), (0, 2 * torch.pi)])
-        self.c = c
-        self.t_final = t_final
-        if u_0 is None:
-            self.u_0 = lambda x: torch.sin(x)
-        else:
-            self.u_0 = u_0
-        self.exact_solution = lambda t, x: self.u_0(x - self.c * t)
+class Burgers(BasePDE):
+    def __init__(self, nu: float = 0.01 / torch.pi):
+        super().__init__("burgers", [(0, 1), (-1, 1)])
+        self.nu = nu
+        self.u_0 = lambda x: -torch.sin(torch.pi * x)
 
-    def get_solution(self, nodes: List[torch.Tensor]):
-        t_mesh, x_mesh = torch.meshgrid(nodes[0], nodes[1], indexing="ij")
-        return self.exact_solution(t_mesh, x_mesh)
+    def get_solution(self, t, x):
+        raise NotImplementedError("Exact solution not implemented for Burgers equation")
 
     def get_pde_loss(
         self,
@@ -54,32 +45,24 @@ class Advection(BasePDE):
 
         if isinstance(model, SpectralInterpolationND):
             # PDE
-            time_start = time()
             u = model.interpolate(pde_nodes)
-            print(f"Time to interpolate: {time() - time_start}")
-            time_start = time()
-            u_t = model.derivative(pde_nodes, k=(1, 0))  # (N_t, N_x)
-            print(f"Time to compute derivatives: {time() - time_start}")
-            time_start = time()
-            u_x = model.derivative(pde_nodes, k=(0, 1))  # (N_t, N_x)
-            print(f"Time to compute derivatives: {time() - time_start}")
+            u_t = model.derivative(pde_nodes, k=(1, 0))
+            u_x = model.derivative(pde_nodes, k=(0, 1))
+            u_xx = model.derivative(pde_nodes, k=(0, 2))
             # IC
-            time_start = time()
-            u_ic = model.interpolate(ic_nodes)[0]  # (N_ic)
-            print(f"Time to interpolate IC: {time() - time_start}")
+            u_ic = model.interpolate(ic_nodes)[0]
         else:
             # PDE
             u = model(pde_nodes).reshape(n_t, n_x)
-            grads = torch.autograd.grad(u.sum(), pde_nodes, create_graph=True)[
-                0
-            ]  # (N_t*N_x, 2)
+            grads = torch.autograd.grad(u.sum(), pde_nodes, create_graph=True)[0]
             u_t = grads[:, 0].reshape(n_t, n_x)
             u_x = grads[:, 1].reshape(n_t, n_x)
+            u_xx = model.derivative(pde_nodes, k=(0, 2))
             # IC
-            u_ic = model(ic_nodes).reshape(n_ic)
+            u_ic = model.interpolate(ic_nodes)[0]
 
         # PDE loss
-        pde_residual = u_t + self.c * u_x
+        pde_residual = u_t + u * u_x - self.nu * u_xx
         pde_loss = torch.mean(pde_residual**2)
         # IC loss
         ic_residual = u_ic - self.u_0(ic_nodes[1])
@@ -88,36 +71,11 @@ class Advection(BasePDE):
         loss = pde_loss + ic_weight * ic_loss
         return loss, pde_loss, ic_loss
 
-    # Get the least squares problem equivalent to a spectral solve
     def get_least_squares(self, model: SpectralInterpolationND):
-        n_t, n_x = model.nodes[0].shape[0], model.nodes[1].shape[0]
-
-        # PDE operator
-        D_t = model.derivative_matrix(k=(1, 0))  # (N_t*N_x, N_t*N_x)
-        D_x = model.derivative_matrix(k=(0, 1))  # (N_t*N_x, N_t*N_x)
-        L = D_t + self.c * D_x
-
-        # Initial condition: extract t=0 values
-        IC = torch.zeros(n_x, n_t * n_x).to(dtype=model.values.dtype)
-        for i in range(n_x):
-            IC[i, n_x * (n_t - 1) + i] = 1  # Set t=0 value to 1 for each x
-
-        # Right hand side
-        b = torch.zeros(n_t * n_x + n_x, dtype=model.values.dtype)
-        b[n_t * n_x :] = self.u_0(model.nodes[1])
-
-        # Full system
-        A = torch.cat([L, IC], dim=0)
-        return A, b
+        raise NotImplementedError("Least squares not implemented for Burgers equation")
 
     def fit_least_squares(self, model: SpectralInterpolationND):
-        A, b = self.get_least_squares(model)
-        u = torch.linalg.lstsq(A, b).solution
-        u = u.reshape(model.nodes[0].shape[0], model.nodes[1].shape[0]).to(
-            dtype=model.values.dtype
-        )
-        model.values.data = u
-        return model
+        raise NotImplementedError("Least squares not implemented for Burgers equation")
 
     def plot_solution(
         self,
@@ -184,42 +142,19 @@ class Advection(BasePDE):
 
 
 if __name__ == "__main__":
-
-    torch.set_default_dtype(torch.float64)
-
     # Problem setup
-    c = 80
-    t_final = 1
-    u_0 = lambda x: torch.sin(x)
-    pde = Advection(c=c, t_final=t_final, u_0=u_0)
-    save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/advection"
+    nu = 0.01 / torch.pi
+    pde = Burgers(nu=nu)
+    save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/burgers"
 
-    # Eval
+    # Evaluation setup
     n_eval = 200
-    t_eval = torch.linspace(pde.domain[0][0], pde.domain[0][1], n_eval)
-    x_eval = torch.linspace(pde.domain[1][0], pde.domain[1][1], n_eval + 1)[:-1]
-
-    # Baseline: least squares
-    print("Fitting model with least squares...")
-    n_t_ls = c + 1
-    n_x_ls = c
-    bases_ls = ["chebyshev", "fourier"]
-    model_ls = SpectralInterpolationND(
-        Ns=[n_t_ls, n_x_ls],
-        bases=bases_ls,
-        domains=pde.domain,
-    )
-    model_ls = pde.fit_least_squares(model_ls)
-    pde.plot_solution(
-        [t_eval, x_eval],
-        model_ls.interpolate([t_eval, x_eval]).detach(),
-        save_path=os.path.join(save_dir, "advection_ls_solution.png"),
-    )
+    t_eval = torch.linspace(0, 1, n_eval)
+    x_eval = torch.linspace(-1, 1, n_eval + 1)[:-1]
 
     # Model setup
-    print("Training model with first-order method...")
-    n_t = c + 1
-    n_x = c
+    n_t = 81
+    n_x = 80
     bases = ["chebyshev", "fourier"]
     model = SpectralInterpolationND(
         Ns=[n_t, n_x],
@@ -232,11 +167,10 @@ if __name__ == "__main__":
     plot_every = 1000
     lr = 1e-3
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    # PDE
     sample_type = ["uniform", "uniform"]
-    n_t_train = 2 * c + 1
-    n_x_train = 2 * c
-    n_ic_train = 2 * c
+    n_t_train = 161
+    n_x_train = 160
+    n_ic_train = 160
     ic_weight = 10
 
     def pde_sampler():

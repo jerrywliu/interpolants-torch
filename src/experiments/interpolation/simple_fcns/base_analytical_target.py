@@ -2,6 +2,7 @@ import torch
 from typing import Callable, List, Tuple
 
 
+# TODO JL 1/17/25: change inputs to be list of tensors?
 class BaseAnalyticalTarget:
     def __init__(
         self,

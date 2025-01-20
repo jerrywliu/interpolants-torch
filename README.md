@@ -8,40 +8,40 @@ conda activate /pscratch/sd/j/jwl50/interpolants-torch/.env
 ```
 python -m src.experiments.interpolation.simple_fcns.abs_1d
 python -m src.experiments.interpolation.simple_fcns.sine_1d
-python -m src.experiments.interpolation.simple_fcns.sine_2d
+python -m src.experiments.interpolation.simple_fcns.logistic_1d
 ```
-### PDE solutions: TODO
+### PDE solutions:
 ```
-python -m src.experiments.interpolation.pde_solns.adv_1d
-python -m src.experiments.interpolation.pde_solns.burgers_1d
-python -m src.experiments.interpolation.pde_solns.allen_cahn
-python -m src.experiments.interpolation.pde_solns.navier_stokes_2d
+python -m src.experiments.interpolation.pde_solns.advection
+python -m src.experiments.interpolation.pde_solns.reaction
+python -m src.experiments.interpolation.pde_solns.wave
 ```
 
 ## ODEs: TODO
 ```
 ```
 
-## Simple PDEs: TODO
+## Simple PDEs:
 ```
-adv_1d
-poisson_2d
-heat_2d
-wave_1d
+python -m src.experiments.pdes.simple.advection
+python -m src.experiments.pdes.simple.reaction
+python -m src.experiments.pdes.simple.wave
 ```
 
-## Benchmark PDEs: TODO
+## Benchmark PDEs: TODO Allen-Cahn and Navier-Stokes
 ```
-burgers_1d
-allen_cahn
-navier_stokes_2d
+python -m src.experiments.pdes.benchmarks.burgers
+python -m src.experiments.pdes.benchmarks.allen_cahn
+python -m src.experiments.pdes.benchmarks.ns_2d
 ```
 
 TODO:
 - Models
   - [x] ND polynomial interpolant
+  - [x] 1D rational interpolant
   - [ ] ND rational interpolant
 - Experiments
-  - [ ] Interpolation
-  - [ ] ODEs and simple PDEs
+  - [x] Interpolation
+  - [ ] ODEs
+  - [x] Simple PDEs
   - [ ] Benchmark PDEs
