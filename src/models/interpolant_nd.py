@@ -7,7 +7,11 @@ import matplotlib.pyplot as plt
 # TODO JL 1/14/2025: add function to get entries corresponding to IC
 class SpectralInterpolationND(nn.Module):
     def __init__(
-        self, Ns: List[int], bases: List[str], domains: List[Tuple[float, float]]
+        self,
+        Ns: List[int],
+        bases: List[str],
+        domains: List[Tuple[float, float]],
+        device: "torch.device",
     ):
         """
         ND interpolation using spectral methods
@@ -38,11 +42,11 @@ class SpectralInterpolationND(nn.Module):
 
         for dim in range(self.n_dim):
             if self.bases[dim] == "chebyshev":
-                i = torch.linspace(0, 1, self.Ns[dim])
+                i = torch.linspace(0, 1, self.Ns[dim], device=device)
                 self.nodes_standard[dim] = torch.cos(torch.pi * i)
                 # Compute barycentric weights for Chebyshev
                 N = self.Ns[dim]
-                weights = torch.ones(N)
+                weights = torch.ones(N, device=device)
                 weights[0] *= 0.5
                 weights[-1] *= 0.5
                 weights[1::2] = -1
@@ -51,7 +55,7 @@ class SpectralInterpolationND(nn.Module):
                 self.k[dim] = None
             else:
                 self.nodes_standard[dim] = torch.linspace(
-                    0, 2 * torch.pi, self.Ns[dim] + 1
+                    0, 2 * torch.pi, self.Ns[dim] + 1, device=device
                 )[:-1]
                 # Compute FFT frequencies
                 self.k[dim] = torch.fft.fftfreq(self.Ns[dim]) * self.Ns[dim]
@@ -92,7 +96,7 @@ class SpectralInterpolationND(nn.Module):
         self.mesh = torch.meshgrid(*mesh_args, indexing="ij")
 
         # Learnable values at node points
-        self.values = nn.Parameter(torch.zeros(self.Ns))
+        self.values = nn.Parameter(torch.zeros(self.Ns, device=device))
 
     def _compute_cheb_derivative_matrix(
         self, nodes: torch.Tensor, domain_length: float
@@ -162,9 +166,9 @@ class SpectralInterpolationND(nn.Module):
         Returns:
             Matrix operator for the mixed derivative
         """
-        assert (
-            len(k) == self.n_dim
-        ), f"Expected {self.n_dim} derivative orders, got {len(k)}"
+        assert len(k) == self.n_dim, (
+            f"Expected {self.n_dim} derivative orders, got {len(k)}"
+        )
 
         # Get 1D matrices for each dimension
         matrices = []
@@ -478,9 +482,9 @@ class SpectralInterpolationND(nn.Module):
         if isinstance(k, int):
             k = (k,) + (0,) * (self.n_dim - 1)
 
-        assert (
-            len(k) == self.n_dim
-        ), f"Expected {self.n_dim} derivative orders, got {len(k)}"
+        assert len(k) == self.n_dim, (
+            f"Expected {self.n_dim} derivative orders, got {len(k)}"
+        )
 
         # If all derivatives are zero, return values
         if all(ki == 0 for ki in k):

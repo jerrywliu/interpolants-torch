@@ -186,7 +186,7 @@ class Reaction(BasePDE):
 
         # Predicted solution
         im1 = ax1.imshow(
-            u.detach().T.numpy(),
+            u.detach().T.cpu().numpy(),
             extent=[
                 self.domain[0][0],
                 self.domain[0][1],
@@ -202,7 +202,7 @@ class Reaction(BasePDE):
         # True solution
         u_true = self.get_solution(nodes)
         im2 = ax2.imshow(
-            u_true.detach().T.numpy(),
+            u_true.detach().T.cpu().numpy(),
             extent=[
                 self.domain[0][0],
                 self.domain[0][1],
@@ -218,7 +218,7 @@ class Reaction(BasePDE):
         # Error on log scale
         error = torch.abs(u - u_true)
         im3 = ax3.imshow(
-            error.detach().T.numpy(),
+            error.detach().T.cpu().numpy(),
             extent=[
                 self.domain[0][0],
                 self.domain[0][1],
@@ -253,8 +253,10 @@ if __name__ == "__main__":
         t_final=t_final,
         u_0=u_0,
         loss_weight_update_policy="grad_norm",
-        loss_weight_update_interval=100,
+        loss_weight_update_interval=-1,
     )
+
+    device = torch.device("cuda")
 
     base_save_dir = "/common/results/pdes/reaction"
     # base_save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/reaction"
@@ -262,10 +264,14 @@ if __name__ == "__main__":
     # Evaluation setup
     n_eval = 200
     t_eval = torch.linspace(
-        pde.domain[0][0], pde.domain[0][1], n_eval, requires_grad=True
+        pde.domain[0][0], pde.domain[0][1], n_eval, requires_grad=True, device=device
     )
     x_eval = torch.linspace(
-        pde.domain[1][0], pde.domain[1][1], n_eval + 1, requires_grad=True
+        pde.domain[1][0],
+        pde.domain[1][1],
+        n_eval + 1,
+        requires_grad=True,
+        device=device,
     )[:-1]
 
     # Training setup
@@ -294,7 +300,7 @@ if __name__ == "__main__":
             basis=bases[1],
             type=sample_type[1],
         )
-        return [t_nodes, x_nodes]
+        return [t_nodes.to(device), x_nodes.to(device)]
 
     def ic_sampler():
         ic_nodes = pde.sample_domain_1d(
@@ -303,7 +309,10 @@ if __name__ == "__main__":
             basis=bases[1],
             type=sample_type[1],
         )
-        return [torch.tensor([0.0], requires_grad=True), ic_nodes]
+        return [
+            torch.tensor([0.0], device=device, requires_grad=True),
+            ic_nodes.to(device),
+        ]
 
     def eval_sampler():
         return t_eval, x_eval
@@ -313,6 +322,9 @@ if __name__ == "__main__":
     # 1. Neural network
     # save_dir = os.path.join(base_save_dir, "mlp")
     # model_mlp = MLP(n_dim=2, hidden_dim=32, activation=torch.tanh)
+
+    # model_mlp = model_mlp.to(device)
+
     # lr = 1e-3
     # optimizer = torch.optim.Adam(model_mlp.parameters(), lr=lr)
     # pde.train_model(
@@ -336,7 +348,9 @@ if __name__ == "__main__":
         Ns=[n_t, n_x],
         bases=bases,
         domains=pde.domain,
+        device=device,
     )
+    model_polynomial = model_polynomial.to(device)
     lr = 1e-3
     optimizer = torch.optim.Adam(model_polynomial.parameters(), lr=lr)
     pde.train_model(
