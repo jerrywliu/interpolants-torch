@@ -8,6 +8,7 @@ from typing import List, Callable, Tuple
 
 from src.experiments.pdes.base_pde import BasePDE
 from src.models.interpolant_nd import SpectralInterpolationND
+from src.models.mlp import MLP
 from src.utils.metrics import l2_error, max_error, l2_relative_error
 
 """
@@ -66,11 +67,12 @@ class Reaction(BasePDE):
             u_ic = model.interpolate(ic_nodes)[0]  # (N_ic)
         else:
             # PDE
-            u = model(pde_nodes).reshape(n_t, n_x)
-            grads = torch.autograd.grad(u.sum(), pde_nodes, create_graph=True)[
-                0
-            ]  # (N_t*N_x, 2)
-            u_t = grads[:, 0].reshape(n_t, n_x)
+            grid = model.make_grid(pde_nodes)
+            u = model.forward_grid(grid).reshape(n_t, n_x)
+            grads = torch.autograd.grad(
+                u.sum(), grid, create_graph=True
+            )  # (N_t*N_x, 2)
+            u_t = grads[0][:, :, 0].reshape(n_t, n_x)
             # IC
             u_ic = model(ic_nodes).reshape(n_ic)
 
@@ -133,7 +135,7 @@ class Reaction(BasePDE):
 
         # Predicted solution
         im1 = ax1.imshow(
-            u.T,
+            u.detach().T.numpy(),
             extent=[
                 self.domain[0][0],
                 self.domain[0][1],
@@ -149,7 +151,7 @@ class Reaction(BasePDE):
         # True solution
         u_true = self.get_solution(nodes)
         im2 = ax2.imshow(
-            u_true.T,
+            u_true.detach().T.numpy(),
             extent=[
                 self.domain[0][0],
                 self.domain[0][1],
@@ -165,7 +167,7 @@ class Reaction(BasePDE):
         # Error on log scale
         error = torch.abs(u - u_true)
         im3 = ax3.imshow(
-            error.T,
+            error.detach().T.numpy(),
             extent=[
                 self.domain[0][0],
                 self.domain[0][1],
@@ -191,33 +193,32 @@ if __name__ == "__main__":
     # Problem setup
     rho = 5
     t_final = 1
-    u_0 = lambda x: torch.exp(-((x - torch.pi) ** 2) / (2 * (torch.pi / 4) ** 2))
+
+    def u_0(x):
+        return torch.exp(-((x - torch.pi) ** 2) / (2 * (torch.pi / 4) ** 2))
+
     pde = Reaction(rho=rho, t_final=t_final, u_0=u_0)
-    save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/reaction"
+
+    base_save_dir = "/common/results/pdes/reaction"
+    # base_save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/reaction"
 
     # Evaluation setup
     n_eval = 200
-    t_eval = torch.linspace(pde.domain[0][0], pde.domain[0][1], n_eval)
-    x_eval = torch.linspace(pde.domain[1][0], pde.domain[1][1], n_eval + 1)[:-1]
-
-    # Model setup
-    print("Training model with first-order method...")
-    n_t = 81
-    n_x = 80
-    bases = ["chebyshev", "fourier"]
-    model = SpectralInterpolationND(
-        Ns=[n_t, n_x],
-        bases=bases,
-        domains=pde.domain,
+    t_eval = torch.linspace(
+        pde.domain[0][0], pde.domain[0][1], n_eval, requires_grad=True
     )
+    x_eval = torch.linspace(
+        pde.domain[1][0], pde.domain[1][1], n_eval + 1, requires_grad=True
+    )[:-1]
 
     # Training setup
     n_epochs = 100000
     plot_every = 1000
-    lr = 1e-3
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
     # PDE
-    sample_type = ["uniform", "uniform"]
+    # sample_type = ["uniform", "uniform"]
+    bases = ["chebyshev", "chebyshev"]
+    sample_type = ["standard", "standard"]
     n_t_train = 161
     n_x_train = 160
     n_ic_train = 160
@@ -245,16 +246,20 @@ if __name__ == "__main__":
             basis=bases[1],
             type=sample_type[1],
         )
-        return [torch.tensor([0.0]), ic_nodes]
+        return [torch.tensor([0.0], requires_grad=True), ic_nodes]
 
     def eval_sampler():
         return t_eval, x_eval
 
     eval_metrics = [l2_error, max_error, l2_relative_error]
 
-    # Train model
+    # 1. Neural network
+    save_dir = os.path.join(base_save_dir, "mlp")
+    model_mlp = MLP(n_dim=2, hidden_dim=32, activation=torch.tanh)
+    lr = 1e-3
+    optimizer = torch.optim.Adam(model_mlp.parameters(), lr=lr)
     pde.train_model(
-        model,
+        model=model_mlp,
         n_epochs=n_epochs,
         optimizer=optimizer,
         pde_sampler=pde_sampler,
@@ -265,3 +270,29 @@ if __name__ == "__main__":
         plot_every=plot_every,
         save_dir=save_dir,
     )
+
+    # # 2. Polynomial interpolation.
+    # Model setup
+    # save_dir = os.path.join(base_save_dir, "polynomial")
+    # n_t = 81
+    # n_x = 80
+    # model_polynomial = SpectralInterpolationND(
+    #     Ns=[n_t, n_x],
+    #     bases=bases,
+    #     domains=pde.domain,
+    # )
+
+    # lr = 1e-3
+    # optimizer = torch.optim.Adam(model_polynomial.parameters(), lr=lr)
+    # pde.train_model(
+    #     model_polynomial,
+    #     n_epochs=n_epochs,
+    #     optimizer=optimizer,
+    #     pde_sampler=pde_sampler,
+    #     ic_sampler=ic_sampler,
+    #     ic_weight=ic_weight,
+    #     eval_sampler=eval_sampler,
+    #     eval_metrics=eval_metrics,
+    #     plot_every=plot_every,
+    #     save_dir=save_dir,
+    # )

@@ -18,6 +18,23 @@ class MLP(nn.Module):
         self.fc1 = nn.Linear(self.n_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, 1)
 
+    def make_grid(self, x: List[torch.Tensor]):
+        # Form the meshgrid of points
+        x_mesh = torch.meshgrid(*x, indexing="ij")
+        x_mesh = torch.stack(x_mesh, dim=-1)
+        return x_mesh
+
+    def forward_grid(self, x_mesh: torch.Tensor):
+        # Form the meshgrid of points
+        out_shape = x_mesh.shape[:-1]
+        x_mesh = x_mesh.reshape(-1, self.n_dim)
+        x_mesh = self.activation(self.fc1(x_mesh))
+        x_mesh = self.fc2(x_mesh)
+        return x_mesh.reshape(out_shape)
+
+    def interpolate(self, x: List[torch.Tensor]):
+        return self.forward(x)
+
     def forward(self, x: List[torch.Tensor]) -> torch.Tensor:
         """
         Forward pass of the network
