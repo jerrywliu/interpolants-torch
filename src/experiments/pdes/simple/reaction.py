@@ -25,7 +25,14 @@ u(t, x) = u_0(x) exp(rho * t) / [u_0(x) exp(rho * t) + (1 - u_0(x))]
 
 
 class Reaction(BasePDE):
-    def __init__(self, rho: float, t_final: float = 1, u_0: Callable = None):
+    def __init__(
+        self,
+        rho: float,
+        t_final: float = 1,
+        u_0: Callable = None,
+        loss_weight_update_policy: str = "grad_norm",
+        loss_weight_update_interval: int = -1,
+    ):
         super().__init__("reaction", [(0, 1), (0, 2 * torch.pi)])
         self.rho = rho
         self.t_final = t_final
@@ -41,9 +48,49 @@ class Reaction(BasePDE):
             / (self.u_0(x) * torch.exp(self.rho * t) + (1 - self.u_0(x)))
         )
 
+        self.loss_weights = [1.0, 1.0]
+        self.loss_weight_update_policy = loss_weight_update_policy
+        self.loss_weight_update_interval = loss_weight_update_interval
+
     def get_solution(self, nodes: List[torch.Tensor]):
         t_mesh, x_mesh = torch.meshgrid(nodes[0], nodes[1], indexing="ij")
         return self.exact_solution(t_mesh, x_mesh)
+
+    def maybe_update_loss_weights(self, epoch, model, optimizer, pde_nodes, ic_nodes):
+        if (
+            self.loss_weight_update_interval == -1
+            or epoch % self.loss_weight_update_interval != 0
+        ):
+            return
+
+        # print("UPDATING LOSS WEIGHTS")
+        if self.loss_weight_update_policy == "grad_norm":
+            num_params = sum(p.numel() for p in model.parameters())
+
+            optimizer.zero_grad()
+            _, pde_loss, _ = self.get_pde_loss(model, pde_nodes, ic_nodes)
+            optimizer.zero_grad()
+            pde_loss.backward(retain_graph=True)
+            avg_pde_loss_grad_norm = (
+                torch.sqrt(sum([torch.sum(p.grad**2) for p in model.parameters()]))
+                / num_params
+            )
+
+            optimizer.zero_grad()
+            _, _, ic_loss = self.get_pde_loss(model, pde_nodes, ic_nodes)
+            optimizer.zero_grad()
+            ic_loss.backward(retain_graph=True)
+            avg_ic_loss_grad_norm = (
+                torch.sqrt(sum([torch.sum(p.grad**2) for p in model.parameters()]))
+                / num_params
+            )
+
+            self.loss_weights = [
+                1.0 / avg_pde_loss_grad_norm,
+                1.0 / avg_ic_loss_grad_norm,
+            ]
+
+            print(self.loss_weights)
 
     def get_pde_loss(
         self,
@@ -82,8 +129,12 @@ class Reaction(BasePDE):
         # IC loss
         ic_residual = u_ic - self.u_0(ic_nodes[1])
         ic_loss = torch.mean(ic_residual**2)
+
         # Total loss
-        loss = pde_loss + ic_weight * ic_loss
+        pde_loss_weight = self.loss_weights[0]
+        ic_loss_weight = self.loss_weights[1]
+
+        loss = (pde_loss_weight * pde_loss) + (ic_weight * ic_loss_weight * ic_loss)
         return loss, pde_loss, ic_loss
 
     # Get the least squares problem equivalent to a spectral solve
@@ -197,7 +248,13 @@ if __name__ == "__main__":
     def u_0(x):
         return torch.exp(-((x - torch.pi) ** 2) / (2 * (torch.pi / 4) ** 2))
 
-    pde = Reaction(rho=rho, t_final=t_final, u_0=u_0)
+    pde = Reaction(
+        rho=rho,
+        t_final=t_final,
+        u_0=u_0,
+        loss_weight_update_policy="grad_norm",
+        loss_weight_update_interval=100,
+    )
 
     base_save_dir = "/common/results/pdes/reaction"
     # base_save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/reaction"
@@ -254,38 +311,12 @@ if __name__ == "__main__":
     eval_metrics = [l2_error, max_error, l2_relative_error]
 
     # 1. Neural network
-    save_dir = os.path.join(base_save_dir, "mlp")
-    model_mlp = MLP(n_dim=2, hidden_dim=32, activation=torch.tanh)
-    lr = 1e-3
-    optimizer = torch.optim.Adam(model_mlp.parameters(), lr=lr)
-    pde.train_model(
-        model=model_mlp,
-        n_epochs=n_epochs,
-        optimizer=optimizer,
-        pde_sampler=pde_sampler,
-        ic_sampler=ic_sampler,
-        ic_weight=ic_weight,
-        eval_sampler=eval_sampler,
-        eval_metrics=eval_metrics,
-        plot_every=plot_every,
-        save_dir=save_dir,
-    )
-
-    # # 2. Polynomial interpolation.
-    # Model setup
-    # save_dir = os.path.join(base_save_dir, "polynomial")
-    # n_t = 81
-    # n_x = 80
-    # model_polynomial = SpectralInterpolationND(
-    #     Ns=[n_t, n_x],
-    #     bases=bases,
-    #     domains=pde.domain,
-    # )
-
+    # save_dir = os.path.join(base_save_dir, "mlp")
+    # model_mlp = MLP(n_dim=2, hidden_dim=32, activation=torch.tanh)
     # lr = 1e-3
-    # optimizer = torch.optim.Adam(model_polynomial.parameters(), lr=lr)
+    # optimizer = torch.optim.Adam(model_mlp.parameters(), lr=lr)
     # pde.train_model(
-    #     model_polynomial,
+    #     model=model_mlp,
     #     n_epochs=n_epochs,
     #     optimizer=optimizer,
     #     pde_sampler=pde_sampler,
@@ -296,3 +327,27 @@ if __name__ == "__main__":
     #     plot_every=plot_every,
     #     save_dir=save_dir,
     # )
+
+    # 2. Polynomial interpolation.
+    save_dir = os.path.join(base_save_dir, "polynomial")
+    n_t = 81
+    n_x = 80
+    model_polynomial = SpectralInterpolationND(
+        Ns=[n_t, n_x],
+        bases=bases,
+        domains=pde.domain,
+    )
+    lr = 1e-3
+    optimizer = torch.optim.Adam(model_polynomial.parameters(), lr=lr)
+    pde.train_model(
+        model_polynomial,
+        n_epochs=n_epochs,
+        optimizer=optimizer,
+        pde_sampler=pde_sampler,
+        ic_sampler=ic_sampler,
+        ic_weight=ic_weight,
+        eval_sampler=eval_sampler,
+        eval_metrics=eval_metrics,
+        plot_every=plot_every,
+        save_dir=save_dir,
+    )

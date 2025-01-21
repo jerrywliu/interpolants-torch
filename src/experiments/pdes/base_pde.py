@@ -66,16 +66,22 @@ class BasePDE:
     ) -> torch.Tensor:
         if type == "standard":
             if basis == "chebyshev":
-                cheb_nodes = torch.cos(torch.linspace(0, torch.pi, n_samples, requires_grad=True))
+                cheb_nodes = torch.cos(
+                    torch.linspace(0, torch.pi, n_samples, requires_grad=True)
+                )
                 return self._from_cheb(cheb_nodes, dim)
             elif basis == "fourier":
-                fourier_nodes = torch.linspace(0, 2 * torch.pi, n_samples + 1, requires_grad=True)[:-1]
+                fourier_nodes = torch.linspace(
+                    0, 2 * torch.pi, n_samples + 1, requires_grad=True
+                )[:-1]
                 return self._from_fourier(fourier_nodes, dim)
             else:
                 raise ValueError(f"Invalid basis: {basis}")
         elif type == "uniform":
             if basis == "chebyshev":
-                uniform_nodes = torch.cos(torch.rand(n_samples, requires_grad=True) * torch.pi)
+                uniform_nodes = torch.cos(
+                    torch.rand(n_samples, requires_grad=True) * torch.pi
+                )
                 return self._from_cheb(uniform_nodes, dim)
             elif basis == "fourier":
                 uniform_nodes = torch.rand(n_samples, requires_grad=True) * 2 * torch.pi
@@ -97,6 +103,9 @@ class BasePDE:
         self, nodes: List[torch.Tensor], u: torch.Tensor, save_path: str = None
     ):
         raise NotImplementedError
+
+    def maybe_update_loss_weights(self, epoch, model, optimizer, pde_nodes, ic_nodes):
+        pass
 
     def train_model(
         self,
@@ -127,6 +136,9 @@ class BasePDE:
             # Sample points
             pde_nodes = pde_sampler()
             ic_nodes = ic_sampler()
+
+            self.maybe_update_loss_weights(epoch, model, optimizer, pde_nodes, ic_nodes)
+
             # Train step
             optimizer.zero_grad()
             # Get PDE loss
