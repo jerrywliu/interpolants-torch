@@ -1,9 +1,8 @@
+import argparse
 import matplotlib.pyplot as plt
 import os
-from time import time
 import torch
 import torch.nn as nn
-from tqdm import tqdm
 from typing import List, Callable, Tuple
 
 from src.experiments.pdes.base_pde import BasePDE
@@ -54,19 +53,11 @@ class Advection(BasePDE):
 
         if isinstance(model, SpectralInterpolationND):
             # PDE
-            time_start = time()
             u = model.interpolate(pde_nodes)
-            print(f"Time to interpolate: {time() - time_start}")
-            time_start = time()
             u_t = model.derivative(pde_nodes, k=(1, 0))  # (N_t, N_x)
-            print(f"Time to compute derivatives: {time() - time_start}")
-            time_start = time()
             u_x = model.derivative(pde_nodes, k=(0, 1))  # (N_t, N_x)
-            print(f"Time to compute derivatives: {time() - time_start}")
             # IC
-            time_start = time()
             u_ic = model.interpolate(ic_nodes)[0]  # (N_ic)
-            print(f"Time to interpolate IC: {time() - time_start}")
         else:
             # PDE
             u = model(pde_nodes).reshape(n_t, n_x)
@@ -185,14 +176,21 @@ class Advection(BasePDE):
 
 if __name__ == "__main__":
 
+    args = argparse.ArgumentParser()
+    args.add_argument("--c", type=int, default=80)
+    args.add_argument("--nt", type=int, required=False)
+    args.add_argument("--nx", type=int, required=False)
+    args.add_argument("--method", type=str, default="adam")
+    args = args.parse_args()
+
     torch.set_default_dtype(torch.float64)
 
     # Problem setup
-    c = 80
+    c = args.c
     t_final = 1
     u_0 = lambda x: torch.sin(x)
     pde = Advection(c=c, t_final=t_final, u_0=u_0)
-    save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/advection"
+    save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/advection_c={c}"
 
     # Eval
     n_eval = 200
@@ -201,8 +199,8 @@ if __name__ == "__main__":
 
     # Baseline: least squares
     print("Fitting model with least squares...")
-    n_t_ls = c + 1
-    n_x_ls = c
+    n_t_ls = args.nt if args.nt is not None else c + 1
+    n_x_ls = args.nx if args.nx is not None else c
     bases_ls = ["chebyshev", "fourier"]
     model_ls = SpectralInterpolationND(
         Ns=[n_t_ls, n_x_ls],
@@ -218,8 +216,8 @@ if __name__ == "__main__":
 
     # Model setup
     print("Training model with first-order method...")
-    n_t = c + 1
-    n_x = c
+    n_t = args.nt if args.nt is not None else c + 1
+    n_x = args.nx if args.nx is not None else c
     bases = ["chebyshev", "fourier"]
     model = SpectralInterpolationND(
         Ns=[n_t, n_x],
@@ -268,16 +266,33 @@ if __name__ == "__main__":
 
     eval_metrics = [l2_error, max_error, l2_relative_error]
 
-    # Train model
-    pde.train_model(
-        model,
-        n_epochs=n_epochs,
-        optimizer=optimizer,
-        pde_sampler=pde_sampler,
-        ic_sampler=ic_sampler,
-        ic_weight=ic_weight,
-        eval_sampler=eval_sampler,
-        eval_metrics=eval_metrics,
-        plot_every=plot_every,
-        save_dir=save_dir,
-    )
+    if args.method == "adam":
+        # Train model
+        pde.train_model(
+            model,
+            n_epochs=n_epochs,
+            optimizer=optimizer,
+            pde_sampler=pde_sampler,
+            ic_sampler=ic_sampler,
+            ic_weight=ic_weight,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            plot_every=plot_every,
+            save_dir=save_dir,
+        )
+
+    elif args.method == "lbfgs":
+        # Train model with L-BFGS
+        optimizer = torch.optim.LBFGS(model.parameters())
+        pde.train_model_lbfgs(
+            model,
+            max_iter=n_epochs,
+            optimizer=optimizer,
+            pde_sampler=pde_sampler,
+            ic_sampler=ic_sampler,
+            ic_weight=ic_weight,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            plot_every=100,
+            save_dir=save_dir,
+        )

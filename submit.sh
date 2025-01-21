@@ -12,9 +12,22 @@
 conda activate /pscratch/sd/j/jwl50/interpolants-torch/.env
 
 # PDEs
-# python -m src.experiments.pdes.simple.advection
+# Advection
+# python -m src.experiments.pdes.simple.advection --c 8 --nt 9 --nx 8
+# python -m src.experiments.pdes.simple.advection --c 40 --nt 41 --nx 40
+python -m src.experiments.pdes.simple.advection --c 80 --nt 81 --nx 80 --method lbfgs
+
+# Reaction
 # python -m src.experiments.pdes.simple.reaction
+
+# Wave
 # python -m src.experiments.pdes.simple.wave
+
+# Burgers
 # python -m src.experiments.pdes.benchmarks.burgers
-python -m src.experiments.pdes.benchmarks.allen_cahn
+
+# Allen-Cahn
+# python -m src.experiments.pdes.benchmarks.allen_cahn
+
+# NS 2D
 # python -m src.experiments.pdes.benchmarks.ns_2d
