@@ -7,8 +7,11 @@ from typing import List, Tuple, Callable
 
 
 class BasePDE:
-    def __init__(self, name: str, domain: List[Tuple[float, float]]):
+    def __init__(
+        self, name: str, domain: List[Tuple[float, float]], device: str = "cpu"
+    ):
         self.name = name
+        self.device = torch.device(device)
         self.domain = domain
         self.n_dims = len(domain)
         self.domain_lengths = [domain[i][1] - domain[i][0] for i in range(self.n_dims)]
@@ -67,19 +70,19 @@ class BasePDE:
         if type == "standard":
             if basis == "chebyshev":
                 cheb_nodes = torch.cos(torch.linspace(0, torch.pi, n_samples))
-                return self._from_cheb(cheb_nodes, dim)
+                return self._from_cheb(cheb_nodes, dim).to(self.device)
             elif basis == "fourier":
                 fourier_nodes = torch.linspace(0, 2 * torch.pi, n_samples + 1)[:-1]
-                return self._from_fourier(fourier_nodes, dim)
+                return self._from_fourier(fourier_nodes, dim).to(self.device)
             else:
                 raise ValueError(f"Invalid basis: {basis}")
         elif type == "uniform":
             if basis == "chebyshev":
                 uniform_nodes = torch.cos(torch.rand(n_samples) * torch.pi)
-                return self._from_cheb(uniform_nodes, dim)
+                return self._from_cheb(uniform_nodes, dim).to(self.device)
             elif basis == "fourier":
                 uniform_nodes = torch.rand(n_samples) * 2 * torch.pi
-                return self._from_fourier(uniform_nodes, dim)
+                return self._from_fourier(uniform_nodes, dim).to(self.device)
             else:
                 raise ValueError(f"Invalid basis: {basis}")
         else:
@@ -162,8 +165,8 @@ class BasePDE:
                 print(f"IC loss: {history['train_ic_loss'][-1]:1.3e}")
                 print(f"Evaluation L2 error: {history['eval_l2_error'][-1]:1.3e}")
                 self.plot_solution(
-                    eval_nodes,
-                    u_eval.detach(),
+                    [eval_nodes[i].cpu() for i in range(len(eval_nodes))],
+                    u_eval.detach().cpu(),
                     save_path=os.path.join(
                         save_dir, f"{self.name}_solution_{epoch}.png"
                     ),

@@ -23,8 +23,14 @@ u(t, x) = u_0(x - c*t)
 
 
 class Advection(BasePDE):
-    def __init__(self, c: float, t_final: float = 1, u_0: Callable = None):
-        super().__init__("advection", [(0, 1), (0, 2 * torch.pi)])
+    def __init__(
+        self,
+        c: float,
+        t_final: float = 1,
+        u_0: Callable = None,
+        device: str = "cpu",
+    ):
+        super().__init__("advection", [(0, 1), (0, 2 * torch.pi)], device=device)
         self.c = c
         self.t_final = t_final
         if u_0 is None:
@@ -35,6 +41,8 @@ class Advection(BasePDE):
 
     def get_solution(self, nodes: List[torch.Tensor]):
         t_mesh, x_mesh = torch.meshgrid(nodes[0], nodes[1], indexing="ij")
+        t_mesh = t_mesh.to(device=nodes[0].device)
+        x_mesh = x_mesh.to(device=nodes[0].device)
         return self.exact_solution(t_mesh, x_mesh)
 
     def get_pde_loss(
@@ -181,22 +189,27 @@ if __name__ == "__main__":
     args.add_argument("--nt", type=int, required=False)
     args.add_argument("--nx", type=int, required=False)
     args.add_argument("--method", type=str, default="adam")
+    args.add_argument("--n_epochs", type=int, default=100000)
     args = args.parse_args()
 
     torch.set_default_dtype(torch.float64)
+    device = "cuda"
 
     # Problem setup
     c = args.c
     t_final = 1
     u_0 = lambda x: torch.sin(x)
-    pde = Advection(c=c, t_final=t_final, u_0=u_0)
+    pde = Advection(c=c, t_final=t_final, u_0=u_0, device=device)
     save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/advection_c={c}"
 
     # Eval
     n_eval = 200
-    t_eval = torch.linspace(pde.domain[0][0], pde.domain[0][1], n_eval)
-    x_eval = torch.linspace(pde.domain[1][0], pde.domain[1][1], n_eval + 1)[:-1]
+    t_eval = torch.linspace(pde.domain[0][0], pde.domain[0][1], n_eval).to(device)
+    x_eval = torch.linspace(pde.domain[1][0], pde.domain[1][1], n_eval + 1)[:-1].to(
+        device
+    )
 
+    """
     # Baseline: least squares
     print("Fitting model with least squares...")
     n_t_ls = args.nt if args.nt is not None else c + 1
@@ -206,6 +219,7 @@ if __name__ == "__main__":
         Ns=[n_t_ls, n_x_ls],
         bases=bases_ls,
         domains=pde.domain,
+        device=device,
     )
     model_ls = pde.fit_least_squares(model_ls)
     pde.plot_solution(
@@ -213,6 +227,7 @@ if __name__ == "__main__":
         model_ls.interpolate([t_eval, x_eval]).detach(),
         save_path=os.path.join(save_dir, "advection_ls_solution.png"),
     )
+    """
 
     # Model setup
     print("Training model with first-order method...")
@@ -223,10 +238,11 @@ if __name__ == "__main__":
         Ns=[n_t, n_x],
         bases=bases,
         domains=pde.domain,
+        device=device,
     )
 
     # Training setup
-    n_epochs = 100000
+    n_epochs = args.n_epochs
     plot_every = 1000
     lr = 1e-3
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -259,7 +275,7 @@ if __name__ == "__main__":
             basis=bases[1],
             type=sample_type[1],
         )
-        return [torch.tensor([0.0]), ic_nodes]
+        return [torch.tensor([0.0]).to(device), ic_nodes]
 
     def eval_sampler():
         return t_eval, x_eval

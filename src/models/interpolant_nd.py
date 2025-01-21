@@ -7,7 +7,11 @@ import matplotlib.pyplot as plt
 # TODO JL 1/14/2025: add function to get entries corresponding to IC
 class SpectralInterpolationND(nn.Module):
     def __init__(
-        self, Ns: List[int], bases: List[str], domains: List[Tuple[float, float]]
+        self,
+        Ns: List[int],
+        bases: List[str],
+        domains: List[Tuple[float, float]],
+        device: str = "cpu",
     ):
         """
         ND interpolation using spectral methods
@@ -18,7 +22,7 @@ class SpectralInterpolationND(nn.Module):
             domains: List of tuples of (min, max) per direction
         """
         super().__init__()
-
+        self.device = torch.device(device)
         # Store domain information
         assert len(Ns) == len(bases) == len(domains)
         self.n_dim = len(Ns)
@@ -39,22 +43,22 @@ class SpectralInterpolationND(nn.Module):
         for dim in range(self.n_dim):
             if self.bases[dim] == "chebyshev":
                 i = torch.linspace(0, 1, self.Ns[dim])
-                self.nodes_standard[dim] = torch.cos(torch.pi * i)
+                self.nodes_standard[dim] = torch.cos(torch.pi * i).to(self.device)
                 # Compute barycentric weights for Chebyshev
                 N = self.Ns[dim]
-                weights = torch.ones(N)
+                weights = torch.ones(N, device=self.device)
                 weights[0] *= 0.5
                 weights[-1] *= 0.5
                 weights[1::2] = -1
                 self.cheb_weights[dim] = weights
-
                 self.k[dim] = None
             else:
                 self.nodes_standard[dim] = torch.linspace(
                     0, 2 * torch.pi, self.Ns[dim] + 1
-                )[:-1]
+                )[:-1].to(self.device)
                 # Compute FFT frequencies
                 self.k[dim] = torch.fft.fftfreq(self.Ns[dim]) * self.Ns[dim]
+                self.k[dim] = self.k[dim].to(self.device)
                 self.cheb_weights[dim] = None
 
             # Set up domain mapping functions for this dimension
@@ -82,7 +86,9 @@ class SpectralInterpolationND(nn.Module):
                 ] + self.domain_lengths[d] * x / (2 * torch.pi)
 
             # Map standard nodes to physical domain
-            self.nodes[dim] = self._from_standard[dim](self.nodes_standard[dim])
+            self.nodes[dim] = self._from_standard[dim](self.nodes_standard[dim]).to(
+                self.device
+            )
 
         # Set up diff matrices cache
         self._diff_matrices = [{} for _ in range(self.n_dim)]
@@ -92,7 +98,7 @@ class SpectralInterpolationND(nn.Module):
         self.mesh = torch.meshgrid(*mesh_args, indexing="ij")
 
         # Learnable values at node points
-        self.values = nn.Parameter(torch.zeros(self.Ns))
+        self.values = nn.Parameter(torch.zeros(self.Ns, device=self.device))
 
     def _compute_cheb_derivative_matrix(
         self, nodes: torch.Tensor, domain_length: float
