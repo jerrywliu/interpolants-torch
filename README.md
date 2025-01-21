@@ -23,7 +23,7 @@ python -m src.experiments.interpolation.pde_solns.wave
 
 ## Simple PDEs:
 ```
-python -m src.experiments.pdes.simple.advection
+python -m src.experiments.pdes.simple.advection --c 8 --nt 17 --nx 16 --n_epochs 500000
 python -m src.experiments.pdes.simple.reaction
 python -m src.experiments.pdes.simple.wave
 ```

@@ -14,8 +14,8 @@ conda activate /pscratch/sd/j/jwl50/interpolants-torch/.env
 # PDEs
 # Advection
 # python -m src.experiments.pdes.simple.advection --c 8 --nt 9 --nx 8
-# python -m src.experiments.pdes.simple.advection --c 40 --nt 41 --nx 40
-python -m src.experiments.pdes.simple.advection --c 80 --nt 81 --nx 80 --n_epochs 500000
+python -m src.experiments.pdes.simple.advection --c 40 --nt 81 --nx 80 --n_epochs 500000
+# python -m src.experiments.pdes.simple.advection --c 80 --nt 81 --nx 80 --n_epochs 500000
 
 # Reaction
 # python -m src.experiments.pdes.simple.reaction

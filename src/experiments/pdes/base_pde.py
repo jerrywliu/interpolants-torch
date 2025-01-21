@@ -165,8 +165,8 @@ class BasePDE:
                 print(f"IC loss: {history['train_ic_loss'][-1]:1.3e}")
                 print(f"Evaluation L2 error: {history['eval_l2_error'][-1]:1.3e}")
                 self.plot_solution(
-                    [eval_nodes[i].cpu() for i in range(len(eval_nodes))],
-                    u_eval.detach().cpu(),
+                    [eval_nodes[i] for i in range(len(eval_nodes))],
+                    u_eval,
                     save_path=os.path.join(
                         save_dir, f"{self.name}_solution_{epoch}.png"
                     ),

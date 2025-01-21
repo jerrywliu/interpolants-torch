@@ -97,12 +97,16 @@ class Advection(BasePDE):
         L = D_t + self.c * D_x
 
         # Initial condition: extract t=0 values
-        IC = torch.zeros(n_x, n_t * n_x).to(dtype=model.values.dtype)
+        IC = torch.zeros(n_x, n_t * n_x).to(
+            dtype=model.values.dtype, device=model.values.device
+        )
         for i in range(n_x):
             IC[i, n_x * (n_t - 1) + i] = 1  # Set t=0 value to 1 for each x
 
         # Right hand side
-        b = torch.zeros(n_t * n_x + n_x, dtype=model.values.dtype)
+        b = torch.zeros(
+            n_t * n_x + n_x, dtype=model.values.dtype, device=model.values.device
+        )
         b[n_t * n_x :] = self.u_0(model.nodes[1])
 
         # Full system
@@ -113,7 +117,8 @@ class Advection(BasePDE):
         A, b = self.get_least_squares(model)
         u = torch.linalg.lstsq(A, b).solution
         u = u.reshape(model.nodes[0].shape[0], model.nodes[1].shape[0]).to(
-            dtype=model.values.dtype
+            dtype=model.values.dtype,
+            device=model.values.device,
         )
         model.values.data = u
         return model
@@ -125,10 +130,11 @@ class Advection(BasePDE):
         save_path: str = None,
     ):
         fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 4))
+        u_cpu = u.detach().cpu()
 
         # Predicted solution
         im1 = ax1.imshow(
-            u.T,
+            u_cpu.T,
             extent=[
                 self.domain[0][0],
                 self.domain[0][1],
@@ -142,7 +148,7 @@ class Advection(BasePDE):
         ax1.set_title("Predicted Solution")
 
         # True solution
-        u_true = self.get_solution(nodes)
+        u_true = self.get_solution(nodes).cpu()
         im2 = ax2.imshow(
             u_true.T,
             extent=[
@@ -158,7 +164,7 @@ class Advection(BasePDE):
         ax2.set_title("True Solution")
 
         # Error on log scale
-        error = torch.abs(u - u_true)
+        error = torch.abs(u_cpu - u_true)
         im3 = ax3.imshow(
             error.T,
             extent=[
@@ -209,7 +215,6 @@ if __name__ == "__main__":
         device
     )
 
-    """
     # Baseline: least squares
     print("Fitting model with least squares...")
     n_t_ls = args.nt if args.nt is not None else c + 1
@@ -224,10 +229,9 @@ if __name__ == "__main__":
     model_ls = pde.fit_least_squares(model_ls)
     pde.plot_solution(
         [t_eval, x_eval],
-        model_ls.interpolate([t_eval, x_eval]).detach(),
+        model_ls.interpolate([t_eval, x_eval]),
         save_path=os.path.join(save_dir, "advection_ls_solution.png"),
     )
-    """
 
     # Model setup
     print("Training model with first-order method...")

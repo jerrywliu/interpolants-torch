@@ -24,8 +24,11 @@ u(t, x) = u_0(x) exp(rho * t) / [u_0(x) exp(rho * t) + (1 - u_0(x))]
 
 
 class Reaction(BasePDE):
-    def __init__(self, rho: float, t_final: float = 1, u_0: Callable = None):
+    def __init__(
+        self, rho: float, t_final: float = 1, u_0: Callable = None, device: str = "cpu"
+    ):
         super().__init__("reaction", [(0, 1), (0, 2 * torch.pi)])
+        self.device = torch.device(device)
         self.rho = rho
         self.t_final = t_final
         if u_0 is None:
@@ -64,6 +67,13 @@ class Reaction(BasePDE):
             u_t = model.derivative(pde_nodes, k=(1, 0))  # (N_t, N_x)
             # IC
             u_ic = model.interpolate(ic_nodes)[0]  # (N_ic)
+            # Enforce periodic boundary conditions at t nodes
+            u_periodic_t0 = model.interpolate(
+                [pde_nodes[0], torch.tensor([model.domains[1][0]]).to(model.device)]
+            )
+            u_periodic_t1 = model.interpolate(
+                [pde_nodes[0], torch.tensor([model.domains[1][1]]).to(model.device)]
+            )
         else:
             # PDE
             u = model(pde_nodes).reshape(n_t, n_x)
@@ -73,6 +83,13 @@ class Reaction(BasePDE):
             u_t = grads[:, 0].reshape(n_t, n_x)
             # IC
             u_ic = model(ic_nodes).reshape(n_ic)
+            # Enforce periodic boundary conditions at t nodes
+            u_periodic_t0 = model(
+                [pde_nodes[0], torch.tensor([model.domains[1][0]]).to(model.device)]
+            )
+            u_periodic_t1 = model(
+                [pde_nodes[0], torch.tensor([model.domains[1][1]]).to(model.device)]
+            )
 
         # PDE loss
         pde_residual = u_t - self.rho * u * (1 - u)
@@ -80,9 +97,11 @@ class Reaction(BasePDE):
         # IC loss
         ic_residual = u_ic - self.u_0(ic_nodes[1])
         ic_loss = torch.mean(ic_residual**2)
+        # Periodic boundary conditions loss
+        pbc_loss = torch.mean((u_periodic_t0 - u_periodic_t1) ** 2)
         # Total loss
-        loss = pde_loss + ic_weight * ic_loss
-        return loss, pde_loss, ic_loss
+        loss = pde_loss + ic_weight * (ic_loss + pbc_loss)
+        return loss, pde_loss, ic_loss + pbc_loss
 
     # Get the least squares problem equivalent to a spectral solve
     # Since this problem is nonlinear, we perform Picard iteration using the model's current guess for u
@@ -130,10 +149,11 @@ class Reaction(BasePDE):
         save_path: str = None,
     ):
         fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 4))
+        u_cpu = u.detach().cpu()
 
         # Predicted solution
         im1 = ax1.imshow(
-            u.T,
+            u_cpu.T,
             extent=[
                 self.domain[0][0],
                 self.domain[0][1],
@@ -147,7 +167,7 @@ class Reaction(BasePDE):
         ax1.set_title("Predicted Solution")
 
         # True solution
-        u_true = self.get_solution(nodes)
+        u_true = self.get_solution(nodes).cpu()
         im2 = ax2.imshow(
             u_true.T,
             extent=[
@@ -163,7 +183,7 @@ class Reaction(BasePDE):
         ax2.set_title("True Solution")
 
         # Error on log scale
-        error = torch.abs(u - u_true)
+        error = torch.abs(u_cpu - u_true)
         im3 = ax3.imshow(
             error.T,
             extent=[
@@ -189,26 +209,34 @@ class Reaction(BasePDE):
 
 if __name__ == "__main__":
     # Problem setup
+
+    torch.set_default_dtype(torch.float64)
+    device = "cuda"
+
     rho = 5
     t_final = 1
     u_0 = lambda x: torch.exp(-((x - torch.pi) ** 2) / (2 * (torch.pi / 4) ** 2))
-    pde = Reaction(rho=rho, t_final=t_final, u_0=u_0)
+    pde = Reaction(rho=rho, t_final=t_final, u_0=u_0, device=device)
     save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/reaction"
 
     # Evaluation setup
     n_eval = 200
-    t_eval = torch.linspace(pde.domain[0][0], pde.domain[0][1], n_eval)
-    x_eval = torch.linspace(pde.domain[1][0], pde.domain[1][1], n_eval + 1)[:-1]
+    t_eval = torch.linspace(pde.domain[0][0], pde.domain[0][1], n_eval).to(device)
+    # x_eval = torch.linspace(pde.domain[1][0], pde.domain[1][1], n_eval + 1)[:-1]
+    x_eval = torch.linspace(pde.domain[1][0], pde.domain[1][1], n_eval).to(device)
 
     # Model setup
     print("Training model with first-order method...")
     n_t = 81
-    n_x = 80
-    bases = ["chebyshev", "fourier"]
+    # n_x = 80
+    n_x = 81
+    # bases = ["chebyshev", "fourier"]
+    bases = ["chebyshev", "chebyshev"]
     model = SpectralInterpolationND(
         Ns=[n_t, n_x],
         bases=bases,
         domains=pde.domain,
+        device=device,
     )
 
     # Training setup
@@ -219,8 +247,10 @@ if __name__ == "__main__":
     # PDE
     sample_type = ["uniform", "uniform"]
     n_t_train = 161
-    n_x_train = 160
-    n_ic_train = 160
+    # n_x_train = 160
+    # n_ic_train = 160
+    n_x_train = 161
+    n_ic_train = 161
     ic_weight = 10
 
     def pde_sampler():
@@ -245,7 +275,7 @@ if __name__ == "__main__":
             basis=bases[1],
             type=sample_type[1],
         )
-        return [torch.tensor([0.0]), ic_nodes]
+        return [torch.tensor([0.0]).to(device), ic_nodes]
 
     def eval_sampler():
         return t_eval, x_eval
