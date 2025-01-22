@@ -218,7 +218,7 @@ if __name__ == "__main__":
     c = args.c
     beta = args.beta
     pde = Wave(c=c, beta=beta, device=device)
-    save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/wave_c={c}_beta={beta}_method={args.method}_n_t={args.n_t}_n_x={args.n_x}"
+    save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/wave/c={c}_beta={beta}_method={args.method}_n_t={args.n_t}_n_x={args.n_x}"
 
     # Evaluation setup
     n_eval = 200

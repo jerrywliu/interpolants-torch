@@ -178,7 +178,7 @@ if __name__ == "__main__":
     # Problem setup
     eps = args.eps
     pde = AllenCahn(eps=eps, device=device)
-    save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/allen_cahn_eps={eps}_method={args.method}_n_epochs={args.n_epochs}"
+    save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/allen_cahn/eps={eps}_method={args.method}_n_epochs={args.n_epochs}"
 
     # Evaluation setup
     n_eval = 200

@@ -230,7 +230,7 @@ if __name__ == "__main__":
     t_final = 1
     u_0 = lambda x: torch.exp(-((x - torch.pi) ** 2) / (2 * (torch.pi / 4) ** 2))
     pde = Reaction(rho=rho, t_final=t_final, u_0=u_0, device=device)
-    save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/reaction_rho={rho}_method={args.method}_n_t={args.n_t}_n_x={args.n_x}"
+    save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/reaction/rho={rho}_method={args.method}_n_t={args.n_t}_n_x={args.n_x}"
 
     # Evaluation setup
     n_eval = 200

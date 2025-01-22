@@ -176,7 +176,7 @@ if __name__ == "__main__":
     # Problem setup
     nu = 0.01 / torch.pi
     pde = Burgers(nu=nu, device=device)
-    save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/burgers_method={args.method}_n_epochs={args.n_epochs}"
+    save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/burgers/method={args.method}_n_epochs={args.n_epochs}"
 
     # Evaluation setup
     n_eval = 200
