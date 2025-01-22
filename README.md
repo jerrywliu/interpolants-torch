@@ -21,19 +21,18 @@ python -m src.experiments.interpolation.pde_solns.wave
 ```
 ```
 
-## Simple PDEs:
+## Simple PDEs: advection, reaction, wave
 ```
-python -m src.experiments.pdes.simple.advection --c 8 --nt 17 --nx 16 --n_epochs 500000
-python -m src.experiments.pdes.simple.advection --c 40 --nt 81 --nx 80 --n_epochs 500000
-python -m src.experiments.pdes.simple.reaction --rho 5 --n_t 81 --n_x 81 --n_epochs 100000
-python -m src.experiments.pdes.simple.wave
+python -m src.experiments.pdes.simple.advection --c 40 --n_t 81 --n_x 80 --n_epochs 100000 --method nys_newton --sample_type standard # Gets to machine precision
+python -m src.experiments.pdes.simple.reaction --rho 5 --n_t 41 --n_x 41 --n_epochs 100000 --method nys_newton --sample_type standard
+python -m src.experiments.pdes.simple.wave --c 2 --beta 5 --n_t 41 --n_x 41 --n_epochs 100000 --method nys_newton --sample_type standard
 ```
 
-## Benchmark PDEs: TODO Allen-Cahn and Navier-Stokes
+## Benchmark PDEs: Burgers, Allen-Cahn
+TODO true solutions for Burgers and Allen-Cahn, NS 2D
 ```
-python -m src.experiments.pdes.benchmarks.burgers
-python -m src.experiments.pdes.benchmarks.allen_cahn
-python -m src.experiments.pdes.benchmarks.ns_2d
+python -m src.experiments.pdes.benchmarks.burgers --n_t 81 --n_x 81 --n_epochs 100000 --method nys_newton --sample_type standard
+python -m src.experiments.pdes.benchmarks.allen_cahn --n_t 81 --n_x 81 --n_epochs 100000 --method nys_newton --sample_type standard
 ```
 
 TODO:

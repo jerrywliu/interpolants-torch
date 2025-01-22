@@ -9,6 +9,8 @@ from src.experiments.pdes.base_pde import BasePDE
 from src.models.interpolant_nd import SpectralInterpolationND
 from src.utils.metrics import l2_error, max_error, l2_relative_error
 
+from src.optimizers.nys_newton_cg import NysNewtonCG
+
 """
 1D Advection equation:
 u_t + c * u_x = 0
@@ -192,8 +194,9 @@ if __name__ == "__main__":
 
     args = argparse.ArgumentParser()
     args.add_argument("--c", type=int, default=80)
-    args.add_argument("--nt", type=int, required=False)
-    args.add_argument("--nx", type=int, required=False)
+    args.add_argument("--n_t", type=int, required=False)
+    args.add_argument("--n_x", type=int, required=False)
+    args.add_argument("--sample_type", type=str, default="standard")
     args.add_argument("--method", type=str, default="adam")
     args.add_argument("--n_epochs", type=int, default=100000)
     args = args.parse_args()
@@ -206,7 +209,7 @@ if __name__ == "__main__":
     t_final = 1
     u_0 = lambda x: torch.sin(x)
     pde = Advection(c=c, t_final=t_final, u_0=u_0, device=device)
-    save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/advection_c={c}"
+    save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/advection_c={c}_method={args.method}_n_t={args.n_t}_n_x={args.n_x}"
 
     # Eval
     n_eval = 200
@@ -217,8 +220,8 @@ if __name__ == "__main__":
 
     # Baseline: least squares
     print("Fitting model with least squares...")
-    n_t_ls = args.nt if args.nt is not None else c + 1
-    n_x_ls = args.nx if args.nx is not None else c
+    n_t_ls = args.n_t if args.n_t is not None else c + 1
+    n_x_ls = args.n_x if args.n_x is not None else c
     bases_ls = ["chebyshev", "fourier"]
     model_ls = SpectralInterpolationND(
         Ns=[n_t_ls, n_x_ls],
@@ -235,8 +238,8 @@ if __name__ == "__main__":
 
     # Model setup
     print("Training model with first-order method...")
-    n_t = args.nt if args.nt is not None else c + 1
-    n_x = args.nx if args.nx is not None else c
+    n_t = args.n_t if args.n_t is not None else c + 1
+    n_x = args.n_x if args.n_x is not None else c
     bases = ["chebyshev", "fourier"]
     model = SpectralInterpolationND(
         Ns=[n_t, n_x],
@@ -251,7 +254,12 @@ if __name__ == "__main__":
     lr = 1e-3
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     # PDE
-    sample_type = ["uniform", "uniform"]
+    if args.sample_type == "standard":
+        sample_type = ["standard", "standard"]
+    elif args.sample_type == "uniform":
+        sample_type = ["uniform", "uniform"]
+    else:
+        raise ValueError(f"Invalid sample type: {args.sample_type}")
     n_t_train = 2 * c + 1
     n_x_train = 2 * c
     n_ic_train = 2 * c
@@ -287,7 +295,7 @@ if __name__ == "__main__":
     eval_metrics = [l2_error, max_error, l2_relative_error]
 
     if args.method == "adam":
-        # Train model
+        # Train model with Adam
         pde.train_model(
             model,
             n_epochs=n_epochs,
@@ -300,7 +308,6 @@ if __name__ == "__main__":
             plot_every=plot_every,
             save_dir=save_dir,
         )
-
     elif args.method == "lbfgs":
         # Train model with L-BFGS
         optimizer = torch.optim.LBFGS(model.parameters())
@@ -314,5 +321,26 @@ if __name__ == "__main__":
             eval_sampler=eval_sampler,
             eval_metrics=eval_metrics,
             plot_every=100,
+            save_dir=save_dir,
+        )
+    elif args.method == "nys_newton":
+        # Train model with Nys-Newton
+        optimizer = NysNewtonCG(
+            model.parameters(),
+            lr=1.0,
+            rank=100,  # rank of Nyström approximation
+            mu=1e-4,  # damping parameter
+            line_search_fn="armijo",
+        )
+        pde.train_model_nys_newton(
+            model,
+            max_iter=n_epochs,
+            optimizer=optimizer,
+            pde_sampler=pde_sampler,
+            ic_sampler=ic_sampler,
+            ic_weight=ic_weight,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            plot_every=10,
             save_dir=save_dir,
         )

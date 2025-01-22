@@ -11,7 +11,8 @@ from src.experiments.pdes.base_pde import BasePDE
 from src.models.interpolant_nd import SpectralInterpolationND
 from src.utils.metrics import l2_error, max_error, l2_relative_error
 
-from torch.profiler import profile, ProfilerActivity, schedule, record_function
+from src.optimizers.shampoo import Shampoo
+from src.optimizers.nys_newton_cg import NysNewtonCG
 
 """
 1D Reaction equation:
@@ -24,11 +25,6 @@ u(t, x=0) = u(t, x=2*pi)
 Solution:
 u(t, x) = u_0(x) exp(rho * t) / [u_0(x) exp(rho * t) + (1 - u_0(x))]
 """
-
-
-# Create a schedule for the profiler
-def create_schedule(wait, warmup, active, repeat):
-    return schedule(wait=wait, warmup=warmup, active=active, repeat=repeat)
 
 
 class Reaction(BasePDE):
@@ -63,31 +59,25 @@ class Reaction(BasePDE):
         ic_weight: float = 1,
         **kwargs,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        with record_function("get_pde_loss_node_setup"):
-            if ic_nodes is None:
-                ic_nodes = [torch.tensor([0.0]), pde_nodes[-1]]
+        if ic_nodes is None:
+            ic_nodes = [torch.tensor([0.0]), pde_nodes[-1]]
 
         n_t, n_x = pde_nodes[0].shape[0], pde_nodes[1].shape[0]
         n_ic = ic_nodes[1].shape[0]
 
         if isinstance(model, SpectralInterpolationND):
             # PDE
-            with record_function("get_pde_loss_interpolate_u"):
-                u = model.interpolate(pde_nodes)
-            with record_function("get_pde_loss_derivative_u"):
-                u_t = model.derivative(pde_nodes, k=(1, 0))  # (N_t, N_x)
+            u = model.interpolate(pde_nodes)
+            u_t = model.derivative(pde_nodes, k=(1, 0))  # (N_t, N_x)
             # IC
-            with record_function("get_pde_loss_interpolate_ic"):
-                u_ic = model.interpolate(ic_nodes)[0]  # (N_ic)
+            u_ic = model.interpolate(ic_nodes)[0]  # (N_ic)
             # Enforce periodic boundary conditions at t nodes
-            with record_function("get_pde_loss_interpolate_periodic_t0"):
-                u_periodic_t0 = model.interpolate(
-                    [pde_nodes[0], torch.tensor([model.domains[1][0]]).to(model.device)]
-                )
-            with record_function("get_pde_loss_interpolate_periodic_t1"):
-                u_periodic_t1 = model.interpolate(
-                    [pde_nodes[0], torch.tensor([model.domains[1][1]]).to(model.device)]
-                )
+            u_periodic_t0 = model.interpolate(
+                [pde_nodes[0], torch.tensor([model.domains[1][0]]).to(model.device)]
+            )
+            u_periodic_t1 = model.interpolate(
+                [pde_nodes[0], torch.tensor([model.domains[1][1]]).to(model.device)]
+            )
         else:
             # PDE
             u = model(pde_nodes).reshape(n_t, n_x)
@@ -227,6 +217,8 @@ if __name__ == "__main__":
     args.add_argument("--rho", type=float, default=5)
     args.add_argument("--n_t", type=int, default=81)
     args.add_argument("--n_x", type=int, default=81)
+    args.add_argument("--sample_type", type=str, default="standard")
+    args.add_argument("--method", type=str, default="adam")
     args.add_argument("--n_epochs", type=int, default=100000)
     args = args.parse_args()
 
@@ -238,7 +230,7 @@ if __name__ == "__main__":
     t_final = 1
     u_0 = lambda x: torch.exp(-((x - torch.pi) ** 2) / (2 * (torch.pi / 4) ** 2))
     pde = Reaction(rho=rho, t_final=t_final, u_0=u_0, device=device)
-    save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/reaction"
+    save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/reaction_rho={rho}_method={args.method}_n_t={args.n_t}_n_x={args.n_x}"
 
     # Evaluation setup
     n_eval = 200
@@ -264,8 +256,12 @@ if __name__ == "__main__":
     lr = 1e-3
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     # PDE
-    sample_type = ["uniform", "uniform"]
-    # sample_type = ["standard", "standard"]
+    if args.sample_type == "standard":
+        sample_type = ["standard", "standard"]
+    elif args.sample_type == "uniform":
+        sample_type = ["uniform", "uniform"]
+    else:
+        raise ValueError(f"Invalid sample type: {args.sample_type}")
     n_t_train = 161
     # n_x_train = 160
     # n_ic_train = 160
@@ -302,58 +298,83 @@ if __name__ == "__main__":
 
     eval_metrics = [l2_error, max_error, l2_relative_error]
 
-    # Profiler setup
-    profiler = torch.profiler.profile(
-        activities=[
-            ProfilerActivity.CPU,
-            ProfilerActivity.CUDA,
-        ],
-        schedule=create_schedule(
-            wait=1,
-            warmup=1,
-            active=3,
-            repeat=2,
-        ),
-        record_shapes=True,
-        profile_memory=True,
-        with_stack=True,
-    )
-    profiler.start()
-
-    # Train model
-    pde.train_model(
-        model,
-        n_epochs=n_epochs,
-        optimizer=optimizer,
-        pde_sampler=pde_sampler,
-        ic_sampler=ic_sampler,
-        ic_weight=ic_weight,
-        eval_sampler=eval_sampler,
-        eval_metrics=eval_metrics,
-        plot_every=plot_every,
-        save_dir=save_dir,
-        profiler=profiler,
-    )
-    profiler.stop()
-
-    # Export profiler results
-    profiler.export_chrome_trace(os.path.join(save_dir, "trace.json"))
-
-    # Then use key_averages() to get the data you want
-    with open(os.path.join(save_dir, "stacks.txt"), "w") as f:
-        f.write(
-            str(
-                profiler.key_averages(group_by_stack_n=5).table(
-                    sort_by="self_cpu_time_total"
-                )
-            )
+    if args.method == "adam":
+        # Train model with Adam
+        pde.train_model(
+            model,
+            n_epochs=n_epochs,
+            optimizer=optimizer,
+            pde_sampler=pde_sampler,
+            ic_sampler=ic_sampler,
+            ic_weight=ic_weight,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            plot_every=plot_every,
+            save_dir=save_dir,
         )
-
-    with open(os.path.join(save_dir, "stacks_cuda.txt"), "w") as f:
-        f.write(
-            str(
-                profiler.key_averages(group_by_stack_n=5).table(
-                    sort_by="self_cuda_time_total"
-                )
-            )
+    elif args.method == "lbfgs":
+        # Train model with L-BFGS
+        optimizer = torch.optim.LBFGS(model.parameters(), history_size=1000)
+        pde.train_model_lbfgs(
+            model,
+            max_iter=n_epochs,
+            optimizer=optimizer,
+            pde_sampler=pde_sampler,
+            ic_sampler=ic_sampler,
+            ic_weight=ic_weight,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            plot_every=100,
+            save_dir=save_dir,
+        )
+    elif args.method == "shampoo":
+        # Train model with Shampoo
+        optimizer = Shampoo(model.parameters(), lr=lr, update_freq=1)
+        pde.train_model(
+            model,
+            n_epochs=n_epochs,
+            optimizer=optimizer,
+            pde_sampler=pde_sampler,
+            ic_sampler=ic_sampler,
+            ic_weight=ic_weight,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            plot_every=plot_every,
+            save_dir=save_dir,
+        )
+    elif args.method == "sgd":
+        # Train model with SGD
+        optimizer = torch.optim.SGD(model.parameters(), lr=1e-4, momentum=0.9)
+        pde.train_model(
+            model,
+            n_epochs=n_epochs,
+            optimizer=optimizer,
+            pde_sampler=pde_sampler,
+            ic_sampler=ic_sampler,
+            ic_weight=ic_weight,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            plot_every=plot_every,
+            save_dir=save_dir,
+        )
+    elif args.method == "nys_newton":
+        # Train model with Nys-Newton
+        optimizer = NysNewtonCG(
+            model.parameters(),
+            lr=1.0,
+            rank=100,  # rank of Nyström approximation
+            mu=1e-4,  # damping parameter
+            line_search_fn="armijo",
+        )
+        pde.train_model_nys_newton(
+            model,
+            max_iter=n_epochs,
+            optimizer=optimizer,
+            pde_sampler=pde_sampler,
+            ic_sampler=ic_sampler,
+            ic_weight=ic_weight,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            plot_every=10,
+            save_dir=save_dir,
         )
