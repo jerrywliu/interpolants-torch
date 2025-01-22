@@ -1,3 +1,4 @@
+import argparse
 import matplotlib.pyplot as plt
 import os
 from time import time
@@ -10,6 +11,8 @@ from src.experiments.pdes.base_pde import BasePDE
 from src.models.interpolant_nd import SpectralInterpolationND
 from src.utils.metrics import l2_error, max_error, l2_relative_error
 
+from torch.profiler import profile, ProfilerActivity, schedule, record_function
+
 """
 1D Reaction equation:
 u_t - rho * u(1-u) = 0
@@ -21,6 +24,11 @@ u(t, x=0) = u(t, x=2*pi)
 Solution:
 u(t, x) = u_0(x) exp(rho * t) / [u_0(x) exp(rho * t) + (1 - u_0(x))]
 """
+
+
+# Create a schedule for the profiler
+def create_schedule(wait, warmup, active, repeat):
+    return schedule(wait=wait, warmup=warmup, active=active, repeat=repeat)
 
 
 class Reaction(BasePDE):
@@ -55,25 +63,31 @@ class Reaction(BasePDE):
         ic_weight: float = 1,
         **kwargs,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if ic_nodes is None:
-            ic_nodes = [torch.tensor([0.0]), pde_nodes[-1]]
+        with record_function("get_pde_loss_node_setup"):
+            if ic_nodes is None:
+                ic_nodes = [torch.tensor([0.0]), pde_nodes[-1]]
 
         n_t, n_x = pde_nodes[0].shape[0], pde_nodes[1].shape[0]
         n_ic = ic_nodes[1].shape[0]
 
         if isinstance(model, SpectralInterpolationND):
             # PDE
-            u = model.interpolate(pde_nodes)
-            u_t = model.derivative(pde_nodes, k=(1, 0))  # (N_t, N_x)
+            with record_function("get_pde_loss_interpolate_u"):
+                u = model.interpolate(pde_nodes)
+            with record_function("get_pde_loss_derivative_u"):
+                u_t = model.derivative(pde_nodes, k=(1, 0))  # (N_t, N_x)
             # IC
-            u_ic = model.interpolate(ic_nodes)[0]  # (N_ic)
+            with record_function("get_pde_loss_interpolate_ic"):
+                u_ic = model.interpolate(ic_nodes)[0]  # (N_ic)
             # Enforce periodic boundary conditions at t nodes
-            u_periodic_t0 = model.interpolate(
-                [pde_nodes[0], torch.tensor([model.domains[1][0]]).to(model.device)]
-            )
-            u_periodic_t1 = model.interpolate(
-                [pde_nodes[0], torch.tensor([model.domains[1][1]]).to(model.device)]
-            )
+            with record_function("get_pde_loss_interpolate_periodic_t0"):
+                u_periodic_t0 = model.interpolate(
+                    [pde_nodes[0], torch.tensor([model.domains[1][0]]).to(model.device)]
+                )
+            with record_function("get_pde_loss_interpolate_periodic_t1"):
+                u_periodic_t1 = model.interpolate(
+                    [pde_nodes[0], torch.tensor([model.domains[1][1]]).to(model.device)]
+                )
         else:
             # PDE
             u = model(pde_nodes).reshape(n_t, n_x)
@@ -208,12 +222,19 @@ class Reaction(BasePDE):
 
 
 if __name__ == "__main__":
-    # Problem setup
+
+    args = argparse.ArgumentParser()
+    args.add_argument("--rho", type=float, default=5)
+    args.add_argument("--n_t", type=int, default=81)
+    args.add_argument("--n_x", type=int, default=81)
+    args.add_argument("--n_epochs", type=int, default=100000)
+    args = args.parse_args()
 
     torch.set_default_dtype(torch.float64)
     device = "cuda"
 
-    rho = 5
+    # Problem setup
+    rho = args.rho
     t_final = 1
     u_0 = lambda x: torch.exp(-((x - torch.pi) ** 2) / (2 * (torch.pi / 4) ** 2))
     pde = Reaction(rho=rho, t_final=t_final, u_0=u_0, device=device)
@@ -227,10 +248,8 @@ if __name__ == "__main__":
 
     # Model setup
     print("Training model with first-order method...")
-    n_t = 81
-    # n_x = 80
-    n_x = 81
-    # bases = ["chebyshev", "fourier"]
+    n_t = args.n_t
+    n_x = args.n_x
     bases = ["chebyshev", "chebyshev"]
     model = SpectralInterpolationND(
         Ns=[n_t, n_x],
@@ -240,12 +259,13 @@ if __name__ == "__main__":
     )
 
     # Training setup
-    n_epochs = 100000
+    n_epochs = args.n_epochs
     plot_every = 1000
     lr = 1e-3
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     # PDE
     sample_type = ["uniform", "uniform"]
+    # sample_type = ["standard", "standard"]
     n_t_train = 161
     # n_x_train = 160
     # n_ic_train = 160
@@ -282,6 +302,24 @@ if __name__ == "__main__":
 
     eval_metrics = [l2_error, max_error, l2_relative_error]
 
+    # Profiler setup
+    profiler = torch.profiler.profile(
+        activities=[
+            ProfilerActivity.CPU,
+            ProfilerActivity.CUDA,
+        ],
+        schedule=create_schedule(
+            wait=1,
+            warmup=1,
+            active=3,
+            repeat=2,
+        ),
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True,
+    )
+    profiler.start()
+
     # Train model
     pde.train_model(
         model,
@@ -294,4 +332,28 @@ if __name__ == "__main__":
         eval_metrics=eval_metrics,
         plot_every=plot_every,
         save_dir=save_dir,
+        profiler=profiler,
     )
+    profiler.stop()
+
+    # Export profiler results
+    profiler.export_chrome_trace(os.path.join(save_dir, "trace.json"))
+
+    # Then use key_averages() to get the data you want
+    with open(os.path.join(save_dir, "stacks.txt"), "w") as f:
+        f.write(
+            str(
+                profiler.key_averages(group_by_stack_n=5).table(
+                    sort_by="self_cpu_time_total"
+                )
+            )
+        )
+
+    with open(os.path.join(save_dir, "stacks_cuda.txt"), "w") as f:
+        f.write(
+            str(
+                profiler.key_averages(group_by_stack_n=5).table(
+                    sort_by="self_cuda_time_total"
+                )
+            )
+        )

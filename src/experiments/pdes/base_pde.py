@@ -2,6 +2,7 @@ import os
 from time import time
 import torch
 import torch.nn as nn
+from torch.profiler import profile, record_function
 from tqdm import tqdm
 from typing import List, Tuple, Callable
 
@@ -113,6 +114,7 @@ class BasePDE:
         eval_metrics: List[Callable],
         plot_every: int = 100,
         save_dir: str = None,
+        profiler: torch.profiler.profile = None,
     ):
         # Training history
         history = {
@@ -127,29 +129,45 @@ class BasePDE:
         print("Training model...")
         start_time = time()
         for epoch in tqdm(range(n_epochs)):
+
+            # Profiler
+            if profiler is not None:
+                profiler.step()
+
             # Sample points
-            pde_nodes = pde_sampler()
-            ic_nodes = ic_sampler()
+            with record_function("sample_pde_nodes"):
+                pde_nodes = pde_sampler()
+            with record_function("sample_ic_nodes"):
+                ic_nodes = ic_sampler()
             # Train step
             optimizer.zero_grad()
             # Get PDE loss
-            loss, pde_loss, ic_loss = self.get_pde_loss(
-                model, pde_nodes, ic_nodes, ic_weight
-            )
-            loss.backward()
-            optimizer.step()
+            with record_function("get_pde_loss"):
+                loss, pde_loss, ic_loss = self.get_pde_loss(
+                    model, pde_nodes, ic_nodes, ic_weight
+                )
+            # Backprop
+            with record_function("backprop"):
+                loss.backward()
+            # Update parameters
+            with record_function("update_parameters"):
+                optimizer.step()
 
             # Evaluate solution
-            eval_nodes = eval_sampler()
-            u_eval = model.interpolate(eval_nodes)
-            u_true = self.get_solution(eval_nodes)
+            with record_function("sample_eval_nodes"):
+                eval_nodes = eval_sampler()
+            with record_function("interpolate_eval_nodes"):
+                u_eval = model.interpolate(eval_nodes)
+            with record_function("get_solution_eval_nodes"):
+                u_true = self.get_solution(eval_nodes)
             for eval_metric in eval_metrics:
                 eval_metric_value = eval_metric(u_eval, u_true)
                 history[f"eval_{eval_metric.__name__}"].append(eval_metric_value)
             # Evaluate PDE loss
-            _, eval_pde_loss, _ = self.get_pde_loss(
-                model, eval_nodes, ic_nodes, ic_weight
-            )
+            with record_function("get_pde_loss_eval"):
+                _, eval_pde_loss, _ = self.get_pde_loss(
+                    model, eval_nodes, ic_nodes, ic_weight
+                )
 
             # Update history
             history["loss"].append(loss.item())
