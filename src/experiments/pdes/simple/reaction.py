@@ -72,12 +72,8 @@ class Reaction(BasePDE):
             # IC
             u_ic = model.interpolate(ic_nodes)[0]  # (N_ic)
             # Enforce periodic boundary conditions at t nodes
-            u_periodic_t0 = model.interpolate(
-                [pde_nodes[0], torch.tensor([model.domains[1][0]]).to(model.device)]
-            )
-            u_periodic_t1 = model.interpolate(
-                [pde_nodes[0], torch.tensor([model.domains[1][1]]).to(model.device)]
-            )
+            u_periodic_t0 = model.interpolate([pde_nodes[0], model.d1])
+            u_periodic_t1 = model.interpolate([pde_nodes[0], model.d2])
         else:
             # PDE
             u = model(pde_nodes).reshape(n_t, n_x)
@@ -233,7 +229,8 @@ if __name__ == "__main__":
         t_final = 1
         u_0 = lambda x: torch.exp(-((x - torch.pi) ** 2) / (2 * (torch.pi / 4) ** 2))
         pde = Reaction(rho=rho, t_final=t_final, u_0=u_0, device=device)
-        save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/reaction/rho={rho}_method={args.method}_n_t={args.n_t}_n_x={args.n_x}"
+        # save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/reaction/rho={rho}_method={args.method}_n_t={args.n_t}_n_x={args.n_x}"
+        save_dir = f"plots/pdes/reaction/rho={rho}_method={args.method}_n_t={args.n_t}_n_x={args.n_x}"
 
         # Evaluation setup
         n_eval = 200
