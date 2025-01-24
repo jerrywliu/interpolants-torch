@@ -1,14 +1,15 @@
+import argparse
 import matplotlib.pyplot as plt
 import os
-from time import time
 import torch
 import torch.nn as nn
-from tqdm import tqdm
 from typing import List, Callable, Tuple
 
 from src.experiments.pdes.base_pde import BasePDE
 from src.models.interpolant_nd import SpectralInterpolationND
 from src.utils.metrics import l2_error, max_error, l2_relative_error
+
+from src.optimizers.nys_newton_cg import NysNewtonCG
 
 """
 1D Advection equation:
@@ -24,8 +25,14 @@ u(t, x) = u_0(x - c*t)
 
 
 class Advection(BasePDE):
-    def __init__(self, c: float, t_final: float = 1, u_0: Callable = None):
-        super().__init__("advection", [(0, 1), (0, 2 * torch.pi)])
+    def __init__(
+        self,
+        c: float,
+        t_final: float = 1,
+        u_0: Callable = None,
+        device: str = "cpu",
+    ):
+        super().__init__("advection", [(0, 1), (0, 2 * torch.pi)], device=device)
         self.c = c
         self.t_final = t_final
         if u_0 is None:
@@ -36,6 +43,8 @@ class Advection(BasePDE):
 
     def get_solution(self, nodes: List[torch.Tensor]):
         t_mesh, x_mesh = torch.meshgrid(nodes[0], nodes[1], indexing="ij")
+        t_mesh = t_mesh.to(device=nodes[0].device)
+        x_mesh = x_mesh.to(device=nodes[0].device)
         return self.exact_solution(t_mesh, x_mesh)
 
     def get_pde_loss(
@@ -54,19 +63,11 @@ class Advection(BasePDE):
 
         if isinstance(model, SpectralInterpolationND):
             # PDE
-            time_start = time()
             u = model.interpolate(pde_nodes)
-            print(f"Time to interpolate: {time() - time_start}")
-            time_start = time()
             u_t = model.derivative(pde_nodes, k=(1, 0))  # (N_t, N_x)
-            print(f"Time to compute derivatives: {time() - time_start}")
-            time_start = time()
             u_x = model.derivative(pde_nodes, k=(0, 1))  # (N_t, N_x)
-            print(f"Time to compute derivatives: {time() - time_start}")
             # IC
-            time_start = time()
             u_ic = model.interpolate(ic_nodes)[0]  # (N_ic)
-            print(f"Time to interpolate IC: {time() - time_start}")
         else:
             # PDE
             u = model(pde_nodes).reshape(n_t, n_x)
@@ -98,12 +99,16 @@ class Advection(BasePDE):
         L = D_t + self.c * D_x
 
         # Initial condition: extract t=0 values
-        IC = torch.zeros(n_x, n_t * n_x).to(dtype=model.values.dtype)
+        IC = torch.zeros(n_x, n_t * n_x).to(
+            dtype=model.values.dtype, device=model.values.device
+        )
         for i in range(n_x):
             IC[i, n_x * (n_t - 1) + i] = 1  # Set t=0 value to 1 for each x
 
         # Right hand side
-        b = torch.zeros(n_t * n_x + n_x, dtype=model.values.dtype)
+        b = torch.zeros(
+            n_t * n_x + n_x, dtype=model.values.dtype, device=model.values.device
+        )
         b[n_t * n_x :] = self.u_0(model.nodes[1])
 
         # Full system
@@ -114,7 +119,8 @@ class Advection(BasePDE):
         A, b = self.get_least_squares(model)
         u = torch.linalg.lstsq(A, b).solution
         u = u.reshape(model.nodes[0].shape[0], model.nodes[1].shape[0]).to(
-            dtype=model.values.dtype
+            dtype=model.values.dtype,
+            device=model.values.device,
         )
         model.values.data = u
         return model
@@ -126,10 +132,11 @@ class Advection(BasePDE):
         save_path: str = None,
     ):
         fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 4))
+        u_cpu = u.detach().cpu()
 
         # Predicted solution
         im1 = ax1.imshow(
-            u.T,
+            u_cpu.T,
             extent=[
                 self.domain[0][0],
                 self.domain[0][1],
@@ -143,7 +150,7 @@ class Advection(BasePDE):
         ax1.set_title("Predicted Solution")
 
         # True solution
-        u_true = self.get_solution(nodes)
+        u_true = self.get_solution(nodes).cpu()
         im2 = ax2.imshow(
             u_true.T,
             extent=[
@@ -159,7 +166,7 @@ class Advection(BasePDE):
         ax2.set_title("True Solution")
 
         # Error on log scale
-        error = torch.abs(u - u_true)
+        error = torch.abs(u_cpu - u_true)
         im3 = ax3.imshow(
             error.T,
             extent=[
@@ -185,55 +192,74 @@ class Advection(BasePDE):
 
 if __name__ == "__main__":
 
+    args = argparse.ArgumentParser()
+    args.add_argument("--c", type=int, default=80)
+    args.add_argument("--n_t", type=int, required=False)
+    args.add_argument("--n_x", type=int, required=False)
+    args.add_argument("--sample_type", type=str, default="standard")
+    args.add_argument("--method", type=str, default="adam")
+    args.add_argument("--n_epochs", type=int, default=100000)
+    args = args.parse_args()
+
     torch.set_default_dtype(torch.float64)
+    device = "cuda"
 
     # Problem setup
-    c = 80
+    c = args.c
     t_final = 1
     u_0 = lambda x: torch.sin(x)
-    pde = Advection(c=c, t_final=t_final, u_0=u_0)
-    save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/advection"
+    pde = Advection(c=c, t_final=t_final, u_0=u_0, device=device)
+    save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/advection/c={c}_method={args.method}_n_t={args.n_t}_n_x={args.n_x}"
 
     # Eval
     n_eval = 200
-    t_eval = torch.linspace(pde.domain[0][0], pde.domain[0][1], n_eval)
-    x_eval = torch.linspace(pde.domain[1][0], pde.domain[1][1], n_eval + 1)[:-1]
+    t_eval = torch.linspace(pde.domain[0][0], pde.domain[0][1], n_eval).to(device)
+    x_eval = torch.linspace(pde.domain[1][0], pde.domain[1][1], n_eval + 1)[:-1].to(
+        device
+    )
 
     # Baseline: least squares
     print("Fitting model with least squares...")
-    n_t_ls = c + 1
-    n_x_ls = c
+    n_t_ls = args.n_t if args.n_t is not None else c + 1
+    n_x_ls = args.n_x if args.n_x is not None else c
     bases_ls = ["chebyshev", "fourier"]
     model_ls = SpectralInterpolationND(
         Ns=[n_t_ls, n_x_ls],
         bases=bases_ls,
         domains=pde.domain,
+        device=device,
     )
     model_ls = pde.fit_least_squares(model_ls)
     pde.plot_solution(
         [t_eval, x_eval],
-        model_ls.interpolate([t_eval, x_eval]).detach(),
+        model_ls.interpolate([t_eval, x_eval]),
         save_path=os.path.join(save_dir, "advection_ls_solution.png"),
     )
 
     # Model setup
     print("Training model with first-order method...")
-    n_t = c + 1
-    n_x = c
+    n_t = args.n_t if args.n_t is not None else c + 1
+    n_x = args.n_x if args.n_x is not None else c
     bases = ["chebyshev", "fourier"]
     model = SpectralInterpolationND(
         Ns=[n_t, n_x],
         bases=bases,
         domains=pde.domain,
+        device=device,
     )
 
     # Training setup
-    n_epochs = 100000
+    n_epochs = args.n_epochs
     plot_every = 1000
     lr = 1e-3
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     # PDE
-    sample_type = ["uniform", "uniform"]
+    if args.sample_type == "standard":
+        sample_type = ["standard", "standard"]
+    elif args.sample_type == "uniform":
+        sample_type = ["uniform", "uniform"]
+    else:
+        raise ValueError(f"Invalid sample type: {args.sample_type}")
     n_t_train = 2 * c + 1
     n_x_train = 2 * c
     n_ic_train = 2 * c
@@ -261,23 +287,60 @@ if __name__ == "__main__":
             basis=bases[1],
             type=sample_type[1],
         )
-        return [torch.tensor([0.0]), ic_nodes]
+        return [torch.tensor([0.0]).to(device), ic_nodes]
 
     def eval_sampler():
         return t_eval, x_eval
 
     eval_metrics = [l2_error, max_error, l2_relative_error]
 
-    # Train model
-    pde.train_model(
-        model,
-        n_epochs=n_epochs,
-        optimizer=optimizer,
-        pde_sampler=pde_sampler,
-        ic_sampler=ic_sampler,
-        ic_weight=ic_weight,
-        eval_sampler=eval_sampler,
-        eval_metrics=eval_metrics,
-        plot_every=plot_every,
-        save_dir=save_dir,
-    )
+    if args.method == "adam":
+        # Train model with Adam
+        pde.train_model(
+            model,
+            n_epochs=n_epochs,
+            optimizer=optimizer,
+            pde_sampler=pde_sampler,
+            ic_sampler=ic_sampler,
+            ic_weight=ic_weight,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            plot_every=plot_every,
+            save_dir=save_dir,
+        )
+    elif args.method == "lbfgs":
+        # Train model with L-BFGS
+        optimizer = torch.optim.LBFGS(model.parameters())
+        pde.train_model_lbfgs(
+            model,
+            max_iter=n_epochs,
+            optimizer=optimizer,
+            pde_sampler=pde_sampler,
+            ic_sampler=ic_sampler,
+            ic_weight=ic_weight,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            plot_every=100,
+            save_dir=save_dir,
+        )
+    elif args.method == "nys_newton":
+        # Train model with Nys-Newton
+        optimizer = NysNewtonCG(
+            model.parameters(),
+            lr=1.0,
+            rank=100,  # rank of Nyström approximation
+            mu=1e-4,  # damping parameter
+            line_search_fn="armijo",
+        )
+        pde.train_model_nys_newton(
+            model,
+            max_iter=n_epochs,
+            optimizer=optimizer,
+            pde_sampler=pde_sampler,
+            ic_sampler=ic_sampler,
+            ic_weight=ic_weight,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            plot_every=10,
+            save_dir=save_dir,
+        )

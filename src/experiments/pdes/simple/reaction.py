@@ -1,3 +1,4 @@
+import argparse
 import matplotlib.pyplot as plt
 import os
 from time import time
@@ -10,6 +11,9 @@ from src.experiments.pdes.base_pde import BasePDE
 from src.models.interpolant_nd import SpectralInterpolationND
 from src.models.mlp import MLP
 from src.utils.metrics import l2_error, max_error, l2_relative_error
+
+from src.optimizers.shampoo import Shampoo
+from src.optimizers.nys_newton_cg import NysNewtonCG
 
 """
 1D Reaction equation:
@@ -32,8 +36,10 @@ class Reaction(BasePDE):
         u_0: Callable = None,
         loss_weight_update_policy: str = "grad_norm",
         loss_weight_update_interval: int = -1,
+        device: str = "cpu",
     ):
         super().__init__("reaction", [(0, 1), (0, 2 * torch.pi)])
+        self.device = torch.device(device)
         self.rho = rho
         self.t_final = t_final
         if u_0 is None:
@@ -48,7 +54,7 @@ class Reaction(BasePDE):
             / (self.u_0(x) * torch.exp(self.rho * t) + (1 - self.u_0(x)))
         )
 
-        self.loss_weights = [1.0, 1.0]
+        self.loss_weights = [1.0, 1.0, 1.0]
         self.loss_weight_update_policy = loss_weight_update_policy
         self.loss_weight_update_interval = loss_weight_update_interval
 
@@ -68,7 +74,7 @@ class Reaction(BasePDE):
             num_params = sum(p.numel() for p in model.parameters())
 
             optimizer.zero_grad()
-            _, pde_loss, _ = self.get_pde_loss(model, pde_nodes, ic_nodes)
+            _, pde_loss, _, _ = self.get_pde_loss(model, pde_nodes, ic_nodes)
             optimizer.zero_grad()
             pde_loss.backward(retain_graph=True)
             avg_pde_loss_grad_norm = (
@@ -77,7 +83,7 @@ class Reaction(BasePDE):
             )
 
             optimizer.zero_grad()
-            _, _, ic_loss = self.get_pde_loss(model, pde_nodes, ic_nodes)
+            _, _, ic_loss, _ = self.get_pde_loss(model, pde_nodes, ic_nodes)
             optimizer.zero_grad()
             ic_loss.backward(retain_graph=True)
             avg_ic_loss_grad_norm = (
@@ -85,9 +91,19 @@ class Reaction(BasePDE):
                 / num_params
             )
 
+            optimizer.zero_grad()
+            _, _, _, pbc_loss = self.get_pde_loss(model, pde_nodes, ic_nodes)
+            optimizer.zero_grad()
+            pbc_loss.backward(retain_graph=True)
+            avg_pbc_loss_grad_norm = (
+                torch.sqrt(sum([torch.sum(p.grad**2) for p in model.parameters()]))
+                / num_params
+            )
+
             self.loss_weights = [
                 1.0 / avg_pde_loss_grad_norm,
                 1.0 / avg_ic_loss_grad_norm,
+                1.0 / avg_pbc_loss_grad_norm,
             ]
 
             print(self.loss_weights)
@@ -112,6 +128,13 @@ class Reaction(BasePDE):
             u_t = model.derivative(pde_nodes, k=(1, 0))  # (N_t, N_x)
             # IC
             u_ic = model.interpolate(ic_nodes)[0]  # (N_ic)
+            # Enforce periodic boundary conditions at t nodes
+            u_periodic_t0 = model.interpolate(
+                [pde_nodes[0], torch.tensor([model.domains[1][0]]).to(model.device)]
+            )
+            u_periodic_t1 = model.interpolate(
+                [pde_nodes[0], torch.tensor([model.domains[1][1]]).to(model.device)]
+            )
         else:
             # PDE
             grid = model.make_grid(pde_nodes)
@@ -122,20 +145,36 @@ class Reaction(BasePDE):
             u_t = grads[0][:, :, 0].reshape(n_t, n_x)
             # IC
             u_ic = model(ic_nodes).reshape(n_ic)
+            # Enforce periodic boundary conditions at t nodes
+            u_periodic_t0 = model(
+                [pde_nodes[0], torch.tensor([model.domains[1][0]]).to(model.device)]
+            )
+            u_periodic_t1 = model(
+                [pde_nodes[0], torch.tensor([model.domains[1][1]]).to(model.device)]
+            )
 
         # PDE loss
         pde_residual = u_t - self.rho * u * (1 - u)
         pde_loss = torch.mean(pde_residual**2)
+
         # IC loss
         ic_residual = u_ic - self.u_0(ic_nodes[1])
         ic_loss = torch.mean(ic_residual**2)
 
+        # Periodic boundary conditions loss.
+        pbc_loss = torch.mean((u_periodic_t0 - u_periodic_t1) ** 2)
+
         # Total loss
         pde_loss_weight = self.loss_weights[0]
         ic_loss_weight = self.loss_weights[1]
+        pbc_loss_weight = self.loss_weights[1]
 
-        loss = (pde_loss_weight * pde_loss) + (ic_weight * ic_loss_weight * ic_loss)
-        return loss, pde_loss, ic_loss
+        loss = (
+            (pde_loss_weight * pde_loss)
+            + (ic_weight * ic_loss_weight * ic_loss)
+            + (ic_weight * pbc_loss_weight * pbc_loss)
+        )
+        return loss, pde_loss, ic_loss, pbc_loss
 
     # Get the least squares problem equivalent to a spectral solve
     # Since this problem is nonlinear, we perform Picard iteration using the model's current guess for u
@@ -183,6 +222,7 @@ class Reaction(BasePDE):
         save_path: str = None,
     ):
         fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 4))
+        u_cpu = u.detach().cpu()
 
         # Predicted solution
         im1 = ax1.imshow(
@@ -200,7 +240,7 @@ class Reaction(BasePDE):
         ax1.set_title("Predicted Solution")
 
         # True solution
-        u_true = self.get_solution(nodes)
+        u_true = self.get_solution(nodes).cpu()
         im2 = ax2.imshow(
             u_true.detach().T.cpu().numpy(),
             extent=[
@@ -216,7 +256,7 @@ class Reaction(BasePDE):
         ax2.set_title("True Solution")
 
         # Error on log scale
-        error = torch.abs(u - u_true)
+        error = torch.abs(u_cpu - u_true)
         im3 = ax3.imshow(
             error.detach().T.cpu().numpy(),
             extent=[
@@ -241,8 +281,20 @@ class Reaction(BasePDE):
 
 
 if __name__ == "__main__":
+    args = argparse.ArgumentParser()
+    args.add_argument("--rho", type=float, default=5)
+    args.add_argument("--n_t", type=int, default=81)
+    args.add_argument("--n_x", type=int, default=81)
+    args.add_argument("--sample_type", type=str, default="standard")
+    args.add_argument("--method", type=str, default="adam")
+    args.add_argument("--n_epochs", type=int, default=100000)
+    args = args.parse_args()
+
+    torch.set_default_dtype(torch.float64)
+    device = "cuda"
+
     # Problem setup
-    rho = 5
+    rho = args.rho
     t_final = 1
 
     def u_0(x):
@@ -254,6 +306,7 @@ if __name__ == "__main__":
         u_0=u_0,
         loss_weight_update_policy="grad_norm",
         loss_weight_update_interval=-1,
+        device=device,
     )
 
     device = torch.device("cuda")
@@ -266,25 +319,32 @@ if __name__ == "__main__":
     t_eval = torch.linspace(
         pde.domain[0][0], pde.domain[0][1], n_eval, requires_grad=True, device=device
     )
+
     x_eval = torch.linspace(
         pde.domain[1][0],
         pde.domain[1][1],
-        n_eval + 1,
+        n_eval,
         requires_grad=True,
         device=device,
-    )[:-1]
+    )
 
     # Training setup
-    n_epochs = 100000
+    n_epochs = args.n_epochs
     plot_every = 1000
 
     # PDE
-    # sample_type = ["uniform", "uniform"]
     bases = ["chebyshev", "chebyshev"]
-    sample_type = ["standard", "standard"]
+
+    if args.sample_type == "standard":
+        sample_type = ["standard", "standard"]
+    elif args.sample_type == "uniform":
+        sample_type = ["uniform", "uniform"]
+    else:
+        raise ValueError(f"Invalid sample type: {args.sample_type}")
+
     n_t_train = 161
-    n_x_train = 160
-    n_ic_train = 160
+    n_x_train = 161
+    n_ic_train = 161
     ic_weight = 10
 
     def pde_sampler():
@@ -342,8 +402,8 @@ if __name__ == "__main__":
 
     # 2. Polynomial interpolation.
     save_dir = os.path.join(base_save_dir, "polynomial")
-    n_t = 81
-    n_x = 80
+    n_t = args.n_t
+    n_x = args.n_x
     model_polynomial = SpectralInterpolationND(
         Ns=[n_t, n_x],
         bases=bases,
@@ -353,15 +413,86 @@ if __name__ == "__main__":
     model_polynomial = model_polynomial.to(device)
     lr = 1e-3
     optimizer = torch.optim.Adam(model_polynomial.parameters(), lr=lr)
-    pde.train_model(
-        model_polynomial,
-        n_epochs=n_epochs,
-        optimizer=optimizer,
-        pde_sampler=pde_sampler,
-        ic_sampler=ic_sampler,
-        ic_weight=ic_weight,
-        eval_sampler=eval_sampler,
-        eval_metrics=eval_metrics,
-        plot_every=plot_every,
-        save_dir=save_dir,
-    )
+
+    if args.method == "adam":
+        # Train model with Adam
+        pde.train_model(
+            model_polynomial,
+            n_epochs=n_epochs,
+            optimizer=optimizer,
+            pde_sampler=pde_sampler,
+            ic_sampler=ic_sampler,
+            ic_weight=ic_weight,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            plot_every=plot_every,
+            save_dir=save_dir,
+        )
+    elif args.method == "lbfgs":
+        # Train model with L-BFGS
+        optimizer = torch.optim.LBFGS(model_polynomial.parameters(), history_size=1000)
+        pde.train_model_lbfgs(
+            model_polynomial,
+            max_iter=n_epochs,
+            optimizer=optimizer,
+            pde_sampler=pde_sampler,
+            ic_sampler=ic_sampler,
+            ic_weight=ic_weight,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            plot_every=100,
+            save_dir=save_dir,
+        )
+    elif args.method == "shampoo":
+        # Train model with Shampoo
+        optimizer = Shampoo(model_polynomial.parameters(), lr=lr, update_freq=1)
+        pde.train_model(
+            model_polynomial,
+            n_epochs=n_epochs,
+            optimizer=optimizer,
+            pde_sampler=pde_sampler,
+            ic_sampler=ic_sampler,
+            ic_weight=ic_weight,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            plot_every=plot_every,
+            save_dir=save_dir,
+        )
+    elif args.method == "sgd":
+        # Train model with SGD
+        optimizer = torch.optim.SGD(
+            model_polynomial.parameters(), lr=1e-4, momentum=0.9
+        )
+        pde.train_model(
+            model_polynomial,
+            n_epochs=n_epochs,
+            optimizer=optimizer,
+            pde_sampler=pde_sampler,
+            ic_sampler=ic_sampler,
+            ic_weight=ic_weight,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            plot_every=plot_every,
+            save_dir=save_dir,
+        )
+    elif args.method == "nys_newton":
+        # Train model with Nys-Newton
+        optimizer = NysNewtonCG(
+            model_polynomial.parameters(),
+            lr=1.0,
+            rank=100,  # rank of Nyström approximation
+            mu=1e-4,  # damping parameter
+            line_search_fn="armijo",
+        )
+        pde.train_model_nys_newton(
+            model_polynomial,
+            max_iter=n_epochs,
+            optimizer=optimizer,
+            pde_sampler=pde_sampler,
+            ic_sampler=ic_sampler,
+            ic_weight=ic_weight,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            plot_every=10,
+            save_dir=save_dir,
+        )

@@ -1,6 +1,7 @@
 import torch
 
 
+# TODO JL 1/22/25: Add NNCG and Shampoo optimizers
 def get_optimizer(model, optimizer_config):
 
     optimizer = getattr(torch.optim, optimizer_config.name)(
