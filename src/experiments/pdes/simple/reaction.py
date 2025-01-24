@@ -211,170 +211,177 @@ class Reaction(BasePDE):
             plt.close()
 
 
+import cProfile
+
 if __name__ == "__main__":
 
-    args = argparse.ArgumentParser()
-    args.add_argument("--rho", type=float, default=5)
-    args.add_argument("--n_t", type=int, default=81)
-    args.add_argument("--n_x", type=int, default=81)
-    args.add_argument("--sample_type", type=str, default="standard")
-    args.add_argument("--method", type=str, default="adam")
-    args.add_argument("--n_epochs", type=int, default=100000)
-    args = args.parse_args()
+    with cProfile.Profile() as pr:
+        args = argparse.ArgumentParser()
+        args.add_argument("--rho", type=float, default=5)
+        args.add_argument("--n_t", type=int, default=81)
+        args.add_argument("--n_x", type=int, default=81)
+        args.add_argument("--sample_type", type=str, default="standard")
+        args.add_argument("--method", type=str, default="adam")
+        args.add_argument("--n_epochs", type=int, default=100000)
+        args = args.parse_args()
 
-    torch.set_default_dtype(torch.float64)
-    device = "cuda"
+        torch.set_default_dtype(torch.float64)
+        device = "cuda"
 
-    # Problem setup
-    rho = args.rho
-    t_final = 1
-    u_0 = lambda x: torch.exp(-((x - torch.pi) ** 2) / (2 * (torch.pi / 4) ** 2))
-    pde = Reaction(rho=rho, t_final=t_final, u_0=u_0, device=device)
-    save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/reaction/rho={rho}_method={args.method}_n_t={args.n_t}_n_x={args.n_x}"
+        # Problem setup
+        rho = args.rho
+        t_final = 1
+        u_0 = lambda x: torch.exp(-((x - torch.pi) ** 2) / (2 * (torch.pi / 4) ** 2))
+        pde = Reaction(rho=rho, t_final=t_final, u_0=u_0, device=device)
+        save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/reaction/rho={rho}_method={args.method}_n_t={args.n_t}_n_x={args.n_x}"
 
-    # Evaluation setup
-    n_eval = 200
-    t_eval = torch.linspace(pde.domain[0][0], pde.domain[0][1], n_eval).to(device)
-    # x_eval = torch.linspace(pde.domain[1][0], pde.domain[1][1], n_eval + 1)[:-1]
-    x_eval = torch.linspace(pde.domain[1][0], pde.domain[1][1], n_eval).to(device)
+        # Evaluation setup
+        n_eval = 200
+        t_eval = torch.linspace(pde.domain[0][0], pde.domain[0][1], n_eval).to(device)
+        # x_eval = torch.linspace(pde.domain[1][0], pde.domain[1][1], n_eval + 1)[:-1]
+        x_eval = torch.linspace(pde.domain[1][0], pde.domain[1][1], n_eval).to(device)
 
-    # Model setup
-    print("Training model with first-order method...")
-    n_t = args.n_t
-    n_x = args.n_x
-    bases = ["chebyshev", "chebyshev"]
-    model = SpectralInterpolationND(
-        Ns=[n_t, n_x],
-        bases=bases,
-        domains=pde.domain,
-        device=device,
+        # Model setup
+        print("Training model with first-order method...")
+        n_t = args.n_t
+        n_x = args.n_x
+        bases = ["chebyshev", "chebyshev"]
+        model = SpectralInterpolationND(
+            Ns=[n_t, n_x],
+            bases=bases,
+            domains=pde.domain,
+            device=device,
+        )
+
+        # Training setup
+        n_epochs = args.n_epochs
+        plot_every = 1000
+        lr = 1e-3
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        # PDE
+        if args.sample_type == "standard":
+            sample_type = ["standard", "standard"]
+        elif args.sample_type == "uniform":
+            sample_type = ["uniform", "uniform"]
+        else:
+            raise ValueError(f"Invalid sample type: {args.sample_type}")
+        n_t_train = 161
+        # n_x_train = 160
+        # n_ic_train = 160
+        n_x_train = 161
+        n_ic_train = 161
+        ic_weight = 10
+
+        def pde_sampler():
+            t_nodes = pde.sample_domain_1d(
+                n_samples=n_t_train,
+                dim=0,
+                basis=bases[0],
+                type=sample_type[0],
+            )
+            x_nodes = pde.sample_domain_1d(
+                n_samples=n_x_train,
+                dim=1,
+                basis=bases[1],
+                type=sample_type[1],
+            )
+            return [t_nodes, x_nodes]
+
+        def ic_sampler():
+            ic_nodes = pde.sample_domain_1d(
+                n_samples=n_ic_train,
+                dim=1,
+                basis=bases[1],
+                type=sample_type[1],
+            )
+            return [torch.tensor([0.0]).to(device), ic_nodes]
+
+        def eval_sampler():
+            return t_eval, x_eval
+
+        eval_metrics = [l2_error, max_error, l2_relative_error]
+
+        if args.method == "adam":
+            # Train model with Adam
+            pde.train_model(
+                model,
+                n_epochs=n_epochs,
+                optimizer=optimizer,
+                pde_sampler=pde_sampler,
+                ic_sampler=ic_sampler,
+                ic_weight=ic_weight,
+                eval_sampler=eval_sampler,
+                eval_metrics=eval_metrics,
+                plot_every=plot_every,
+                save_dir=save_dir,
+            )
+        elif args.method == "lbfgs":
+            # Train model with L-BFGS
+            optimizer = torch.optim.LBFGS(model.parameters(), history_size=1000)
+            pde.train_model_lbfgs(
+                model,
+                max_iter=n_epochs,
+                optimizer=optimizer,
+                pde_sampler=pde_sampler,
+                ic_sampler=ic_sampler,
+                ic_weight=ic_weight,
+                eval_sampler=eval_sampler,
+                eval_metrics=eval_metrics,
+                plot_every=100,
+                save_dir=save_dir,
+            )
+        elif args.method == "shampoo":
+            # Train model with Shampoo
+            optimizer = Shampoo(model.parameters(), lr=lr, update_freq=1)
+            pde.train_model(
+                model,
+                n_epochs=n_epochs,
+                optimizer=optimizer,
+                pde_sampler=pde_sampler,
+                ic_sampler=ic_sampler,
+                ic_weight=ic_weight,
+                eval_sampler=eval_sampler,
+                eval_metrics=eval_metrics,
+                plot_every=plot_every,
+                save_dir=save_dir,
+            )
+        elif args.method == "sgd":
+            # Train model with SGD
+            optimizer = torch.optim.SGD(model.parameters(), lr=1e-4, momentum=0.9)
+            pde.train_model(
+                model,
+                n_epochs=n_epochs,
+                optimizer=optimizer,
+                pde_sampler=pde_sampler,
+                ic_sampler=ic_sampler,
+                ic_weight=ic_weight,
+                eval_sampler=eval_sampler,
+                eval_metrics=eval_metrics,
+                plot_every=plot_every,
+                save_dir=save_dir,
+            )
+        elif args.method == "nys_newton":
+            # Train model with Nys-Newton
+            optimizer = NysNewtonCG(
+                model.parameters(),
+                lr=1.0,
+                rank=100,  # rank of Nyström approximation
+                mu=1e-4,  # damping parameter
+                line_search_fn="armijo",
+            )
+            pde.train_model_nys_newton(
+                model,
+                max_iter=n_epochs,
+                optimizer=optimizer,
+                pde_sampler=pde_sampler,
+                ic_sampler=ic_sampler,
+                ic_weight=ic_weight,
+                eval_sampler=eval_sampler,
+                eval_metrics=eval_metrics,
+                plot_every=10,
+                save_dir=save_dir,
+            )
+
+    pr.dump_stats(
+        f"reaction_rho={rho}_method={args.method}_n_t={args.n_t}_n_x={args.n_x}.prof"
     )
-
-    # Training setup
-    n_epochs = args.n_epochs
-    plot_every = 1000
-    lr = 1e-3
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    # PDE
-    if args.sample_type == "standard":
-        sample_type = ["standard", "standard"]
-    elif args.sample_type == "uniform":
-        sample_type = ["uniform", "uniform"]
-    else:
-        raise ValueError(f"Invalid sample type: {args.sample_type}")
-    n_t_train = 161
-    # n_x_train = 160
-    # n_ic_train = 160
-    n_x_train = 161
-    n_ic_train = 161
-    ic_weight = 10
-
-    def pde_sampler():
-        t_nodes = pde.sample_domain_1d(
-            n_samples=n_t_train,
-            dim=0,
-            basis=bases[0],
-            type=sample_type[0],
-        )
-        x_nodes = pde.sample_domain_1d(
-            n_samples=n_x_train,
-            dim=1,
-            basis=bases[1],
-            type=sample_type[1],
-        )
-        return [t_nodes, x_nodes]
-
-    def ic_sampler():
-        ic_nodes = pde.sample_domain_1d(
-            n_samples=n_ic_train,
-            dim=1,
-            basis=bases[1],
-            type=sample_type[1],
-        )
-        return [torch.tensor([0.0]).to(device), ic_nodes]
-
-    def eval_sampler():
-        return t_eval, x_eval
-
-    eval_metrics = [l2_error, max_error, l2_relative_error]
-
-    if args.method == "adam":
-        # Train model with Adam
-        pde.train_model(
-            model,
-            n_epochs=n_epochs,
-            optimizer=optimizer,
-            pde_sampler=pde_sampler,
-            ic_sampler=ic_sampler,
-            ic_weight=ic_weight,
-            eval_sampler=eval_sampler,
-            eval_metrics=eval_metrics,
-            plot_every=plot_every,
-            save_dir=save_dir,
-        )
-    elif args.method == "lbfgs":
-        # Train model with L-BFGS
-        optimizer = torch.optim.LBFGS(model.parameters(), history_size=1000)
-        pde.train_model_lbfgs(
-            model,
-            max_iter=n_epochs,
-            optimizer=optimizer,
-            pde_sampler=pde_sampler,
-            ic_sampler=ic_sampler,
-            ic_weight=ic_weight,
-            eval_sampler=eval_sampler,
-            eval_metrics=eval_metrics,
-            plot_every=100,
-            save_dir=save_dir,
-        )
-    elif args.method == "shampoo":
-        # Train model with Shampoo
-        optimizer = Shampoo(model.parameters(), lr=lr, update_freq=1)
-        pde.train_model(
-            model,
-            n_epochs=n_epochs,
-            optimizer=optimizer,
-            pde_sampler=pde_sampler,
-            ic_sampler=ic_sampler,
-            ic_weight=ic_weight,
-            eval_sampler=eval_sampler,
-            eval_metrics=eval_metrics,
-            plot_every=plot_every,
-            save_dir=save_dir,
-        )
-    elif args.method == "sgd":
-        # Train model with SGD
-        optimizer = torch.optim.SGD(model.parameters(), lr=1e-4, momentum=0.9)
-        pde.train_model(
-            model,
-            n_epochs=n_epochs,
-            optimizer=optimizer,
-            pde_sampler=pde_sampler,
-            ic_sampler=ic_sampler,
-            ic_weight=ic_weight,
-            eval_sampler=eval_sampler,
-            eval_metrics=eval_metrics,
-            plot_every=plot_every,
-            save_dir=save_dir,
-        )
-    elif args.method == "nys_newton":
-        # Train model with Nys-Newton
-        optimizer = NysNewtonCG(
-            model.parameters(),
-            lr=1.0,
-            rank=100,  # rank of Nyström approximation
-            mu=1e-4,  # damping parameter
-            line_search_fn="armijo",
-        )
-        pde.train_model_nys_newton(
-            model,
-            max_iter=n_epochs,
-            optimizer=optimizer,
-            pde_sampler=pde_sampler,
-            ic_sampler=ic_sampler,
-            ic_weight=ic_weight,
-            eval_sampler=eval_sampler,
-            eval_metrics=eval_metrics,
-            plot_every=10,
-            save_dir=save_dir,
-        )
