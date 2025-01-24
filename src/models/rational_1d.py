@@ -88,7 +88,7 @@ def compute_barycentric_weights_vect(
 
 # This model's learnable parameters are the values at the nodes and the barycentric weights.
 class RationalInterpolation1D(nn.Module):
-    def __init__(self, N: int, domain: Tuple[float, float]):
+    def __init__(self, N: int, domain: Tuple[float, float], device: str = "cpu"):
         """
         Rational interpolation with Chebyshev backbone and learnable weights
 
@@ -97,6 +97,7 @@ class RationalInterpolation1D(nn.Module):
             domain: Tuple of floats (min, max) specifying the domain
         """
         super().__init__()
+        self.device = torch.device(device)
 
         # Chebyshev backbone
         self.N = N
@@ -105,14 +106,14 @@ class RationalInterpolation1D(nn.Module):
         # Standard domain is [-1, 1]
         self.to_standard = lambda x: 2 * (x - self.domain[0]) / self.domain_length - 1
         self.from_standard = lambda x: (x + 1) * self.domain_length / 2 + self.domain[0]
-        self.nodes = get_cheb_nodes(N)
-        self.nodes_standard = self.to_standard(self.nodes)
+        self.nodes = get_cheb_nodes(N).to(self.device)
+        self.nodes_standard = self.to_standard(self.nodes).to(self.device)
 
         # Values at nodes
-        self.values = nn.Parameter(torch.zeros(N))
+        self.values = nn.Parameter(torch.zeros(N, device=self.device))
 
         # Initialize weights using standard barycentric formula
-        init_weights = compute_barycentric_weights_vect(self.nodes)
+        init_weights = compute_barycentric_weights_vect(self.nodes).to(self.device)
 
         # Make weights learnable parameters
         self.weights = nn.Parameter(init_weights)
@@ -269,7 +270,13 @@ class RationalInterpolation1D(nn.Module):
 
 # This model's learnable parameters are the values at the nodes and the poles.
 class RationalInterpolationPoles1D(nn.Module):
-    def __init__(self, N: int, domain: Tuple[float, float], num_poles: int = 1):
+    def __init__(
+        self,
+        N: int,
+        domain: Tuple[float, float],
+        num_poles: int = 1,
+        device: str = "cpu",
+    ):
         """
         Rational interpolation with Chebyshev backbone and learnable poles (in conjugate pairs)
 
@@ -279,7 +286,7 @@ class RationalInterpolationPoles1D(nn.Module):
             num_poles: Number of conjugate pairs of poles
         """
         super().__init__()
-
+        self.device = torch.device(device)
         # Chebyshev backbone
         self.N = N
         self.domain = domain
@@ -287,15 +294,15 @@ class RationalInterpolationPoles1D(nn.Module):
         # Standard domain is [-1, 1]
         self.to_standard = lambda x: 2 * (x - self.domain[0]) / self.domain_length - 1
         self.from_standard = lambda x: (x + 1) * self.domain_length / 2 + self.domain[0]
-        self.nodes = get_cheb_nodes(N)
-        self.nodes_standard = self.to_standard(self.nodes)
+        self.nodes = get_cheb_nodes(N).to(self.device)
+        self.nodes_standard = self.to_standard(self.nodes).to(self.device)
 
         # Values at nodes
-        self.values = nn.Parameter(torch.zeros(N))
+        self.values = nn.Parameter(torch.zeros(N, device=self.device))
 
         # Initialize poles
-        self.poles_real = nn.Parameter(torch.randn(num_poles))
-        self.poles_imag_raw = nn.Parameter(torch.randn(num_poles))
+        self.poles_real = nn.Parameter(torch.randn(num_poles, device=self.device))
+        self.poles_imag_raw = nn.Parameter(torch.randn(num_poles, device=self.device))
         self.poles_imag = F.softplus(self.poles_imag_raw)
 
     def _update_barycentric_weights(self):
