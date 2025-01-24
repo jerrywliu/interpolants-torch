@@ -36,6 +36,7 @@ class Reaction(BasePDE):
         u_0: Callable = None,
         loss_weight_update_policy: str = "grad_norm",
         loss_weight_update_interval: int = -1,
+        loss_weight_max: float = 100.0,
         device: str = "cpu",
     ):
         super().__init__("reaction", [(0, 1), (0, 2 * torch.pi)])
@@ -55,6 +56,7 @@ class Reaction(BasePDE):
         )
 
         self.loss_weights = [1.0, 1.0, 1.0]
+        self.loss_weight_max = loss_weight_max
         self.loss_weight_update_policy = loss_weight_update_policy
         self.loss_weight_update_interval = loss_weight_update_interval
 
@@ -108,7 +110,11 @@ class Reaction(BasePDE):
                 1.0 / avg_pbc_loss_grad_norm,
             ]
 
-            print(self.loss_weights)
+            self.loss_weights = [
+                min(lw, self.loss_weight_max) for lw in self.loss_weights
+            ]
+
+            # print(self.loss_weights)
 
     def get_loss_dict(
         self,
@@ -340,6 +346,12 @@ if __name__ == "__main__":
     args.add_argument("--sample_type", type=str, default="standard")
     args.add_argument("--method", type=str, default="adam")
     args.add_argument("--n_epochs", type=int, default=100000)
+
+    # lwup is one of [grad_norm, none].
+    args.add_argument("--loss_weight_update_policy", "-lwup", type=str, default="none")
+    args.add_argument("--loss_weight_update_interval", "-lwui", type=int, default=-1)
+    args.add_argument("--loss_weight_max", "-lmw", type=float, default=100.0)
+
     args = args.parse_args()
 
     torch.set_default_dtype(torch.float64)
@@ -356,8 +368,9 @@ if __name__ == "__main__":
         rho=rho,
         t_final=t_final,
         u_0=u_0,
-        loss_weight_update_policy="grad_norm",
-        loss_weight_update_interval=-1,
+        loss_weight_update_policy=args.loss_weight_update_policy,
+        loss_weight_update_interval=args.loss_weight_update_interval,
+        loss_weight_max=args.loss_weight_max,
         device=device,
     )
 
