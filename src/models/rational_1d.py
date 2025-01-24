@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Tuple, Callable, List, Union
 
 
@@ -111,7 +112,7 @@ class RationalInterpolation1D(nn.Module):
         self.values = nn.Parameter(torch.zeros(N))
 
         # Initialize weights using standard barycentric formula
-        init_weights = compute_barycentric_weights(self.nodes)
+        init_weights = compute_barycentric_weights_vect(self.nodes)
 
         # Make weights learnable parameters
         self.weights = nn.Parameter(init_weights)
@@ -294,7 +295,14 @@ class RationalInterpolationPoles1D(nn.Module):
 
         # Initialize poles
         self.poles_real = nn.Parameter(torch.randn(num_poles))
-        self.poles_imag = nn.Parameter(torch.randn(num_poles))
+        self.poles_imag_raw = nn.Parameter(torch.randn(num_poles))
+        self.poles_imag = F.softplus(self.poles_imag_raw)
+
+    def _update_barycentric_weights(self):
+        self.poles_imag = F.softplus(self.poles_imag_raw)
+        self.weights = compute_barycentric_weights_vect(
+            self.nodes, self.poles_real, self.poles_imag
+        )
 
     def _compute_derivative_matrix(
         self,
@@ -399,9 +407,8 @@ class RationalInterpolationPoles1D(nn.Module):
         Returns:
             shape (N_eval) - interpolated values
         """
-        weights = compute_barycentric_weights(
-            self.nodes, self.poles_real, self.poles_imag
-        )
+        self._update_barycentric_weights()
+        weights = self.weights
 
         if isinstance(x_eval, List):
             assert (
@@ -434,9 +441,8 @@ class RationalInterpolationPoles1D(nn.Module):
         Returns:
             Tensor of shape (...) containing derivative values at x_eval points
         """
-        weights = compute_barycentric_weights(
-            self.nodes, self.poles_real, self.poles_imag
-        )
+        self._update_barycentric_weights()
+        weights = self.weights
 
         if k == 0:
             return self(x_eval)
@@ -455,3 +461,21 @@ class RationalInterpolationPoles1D(nn.Module):
             self.to_standard,
             weights,
         )
+
+
+if __name__ == "__main__":
+    # Sanity check: compute_barycentric_weights
+    torch.manual_seed(0)
+    n_nodes = 10
+    n_poles = 5
+    nodes = torch.randn(n_nodes)
+    pole_real = torch.randn(n_poles)
+    pole_imag = torch.abs(torch.randn(n_poles))  # Make positive for sqrt
+
+    # Compute weights both ways
+    w1 = compute_barycentric_weights(nodes, pole_real, pole_imag)
+    w2 = compute_barycentric_weights_vect(nodes, pole_real, pole_imag)
+
+    # Check if proportional
+    ratio = w1 / w2
+    print(f"Max relative difference in ratios: {(ratio/ratio[0] - 1).abs().max()}")
