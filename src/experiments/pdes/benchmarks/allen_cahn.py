@@ -1,6 +1,7 @@
 import argparse
 import matplotlib.pyplot as plt
 import os
+import scipy.io
 from time import time
 import torch
 import torch.nn as nn
@@ -29,14 +30,21 @@ class AllenCahn(BasePDE):
         self.device = torch.device(device)
         self.eps = eps
         self.u_0 = lambda x: x**2 * torch.cos(torch.pi * x)
-        # TODO JL 1/22/25: add true solution
-        self.exact_solution = (
-            lambda t, x: x**2 * torch.cos(torch.pi * x) * torch.cos(2 * torch.pi * t)
-        )
+        self.ref_u, self.ref_t, self.ref_x = self.load_ref_soln()
 
+    def load_ref_soln(
+        self,
+        path: str = "/pscratch/sd/j/jwl50/interpolants-torch/src/experiments/pdes/benchmarks/ref/allen_cahn_d=1e-4.mat",
+    ):
+        mat = scipy.io.loadmat(path)
+        u_ref = torch.tensor(mat["usol"], dtype=torch.float64, device=self.device)
+        t = torch.tensor(mat["t"][0], dtype=torch.float64, device=self.device)
+        x = torch.tensor(mat["x"][0], dtype=torch.float64, device=self.device)
+        return u_ref, t, x
+
+    # Hack: assume t and x are the same as the reference solution
     def get_solution(self, nodes: List[torch.Tensor]):
-        t_mesh, x_mesh = torch.meshgrid(nodes[0], nodes[1], indexing="ij")
-        return self.exact_solution(t_mesh, x_mesh)
+        return self.ref_u
 
     def get_pde_loss(
         self,
@@ -182,8 +190,8 @@ if __name__ == "__main__":
 
     # Evaluation setup
     n_eval = 200
-    t_eval = torch.linspace(0, 1, n_eval).to(device)
-    x_eval = torch.linspace(-1, 1, n_eval + 1)[:-1].to(device)
+    t_eval = pde.ref_t
+    x_eval = pde.ref_x
 
     # Model setup
     n_t = args.n_t
