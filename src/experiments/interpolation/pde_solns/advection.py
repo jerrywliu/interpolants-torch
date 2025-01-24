@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import os
 import torch
 
-from src.experiments.interpolation.simple_fcns.base_analytical_target import (
+from experiments.interpolation.base_analytical_target import (
     BaseAnalyticalTarget,
 )
 from src.models.interpolant_nd import SpectralInterpolationND
@@ -17,8 +17,11 @@ class AdvectionTarget(BaseAnalyticalTarget):
         )
         self.c = c
 
-    def get_exact_solution(self, t: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-        return self.f(t, x)
+    def get_solution(self, nodes: List[torch.Tensor]) -> torch.Tensor:
+        t_mesh, x_mesh = torch.meshgrid(nodes[0], nodes[1], indexing="ij")
+        t_mesh = t_mesh.to(device=nodes[0].device)
+        x_mesh = x_mesh.to(device=nodes[0].device)
+        return self.f(t_mesh, x_mesh)
 
     def plot_solution(
         self,
@@ -70,6 +73,51 @@ class AdvectionTarget(BaseAnalyticalTarget):
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             plt.savefig(save_path)
             plt.close()
+
+    def train_model(
+        self,
+        model: nn.Module,
+        n_epochs: int,
+        optimizer: torch.optim.Optimizer,
+        basis_type: str,  # "chebyshev" or "fourier"
+        sample_type: str,  # standard or uniform
+        n_samples: int,
+        x_eval: torch.Tensor,
+        plot_every: int = 100,
+        save_dir: str = None,
+    ):
+        # Training history
+        history = {
+            "loss": [],
+            "eval_l2_error": [],
+            "eval_max_error": [],
+        }
+        loss_fn = nn.MSELoss()
+
+        print("Training model...")
+        start_time = time()
+        for epoch in tqdm(range(n_epochs)):
+            # Sample points
+            t_train = self.sample_domain_1d(
+                n_samples=n_samples,
+                dim=0,
+                basis=basis_type,
+                type=sample_type,
+            )
+            x_train = self.sample_domain_1d(
+                n_samples=n_samples,
+                dim=1,
+                basis=basis_type,
+                type=sample_type,
+            )
+            f_train_pred = model([t_train, x_train])
+            f_train_true = self.get_exact_solution(t_train, x_train)
+
+            # Train step
+            optimizer.zero_grad()
+            loss = loss_fn(f_train_pred, f_train_true)
+            loss.backward()
+            optimizer.step()
 
 
 if __name__ == "__main__":

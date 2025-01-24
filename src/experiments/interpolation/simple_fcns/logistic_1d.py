@@ -6,7 +6,7 @@ import torch.nn as nn
 from tqdm import tqdm
 from typing import Callable
 
-from src.experiments.interpolation.simple_fcns.base_analytical_target import (
+from experiments.interpolation.base_analytical_target import (
     BaseAnalyticalTarget,
 )
 from src.models.interpolant_nd import SpectralInterpolationND

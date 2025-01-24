@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import os
 import torch
 
-from src.experiments.interpolation.simple_fcns.base_analytical_target import (
+from experiments.interpolation.base_analytical_target import (
     BaseAnalyticalTarget,
 )
 from src.models.interpolant_nd import SpectralInterpolationND
