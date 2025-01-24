@@ -4,7 +4,7 @@ from typing import List
 
 
 class MLP(nn.Module):
-    def __init__(self, n_dim=1, hidden_dim=32, activation=torch.tanh):
+    def __init__(self, n_dim=1, hidden_dim=32, device="cpu", activation=torch.tanh):
         """
         2-layer MLP that maps (B, n_dim) -> (B, 1)
 
@@ -15,12 +15,16 @@ class MLP(nn.Module):
         super().__init__()
         self.n_dim = n_dim
         self.activation = activation
-        self.fc1 = nn.Linear(self.n_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, 1)
+        self.fc1 = nn.Linear(self.n_dim, hidden_dim, device=device)
+        self.fc2 = nn.Linear(hidden_dim, 1, device=device)
+        self.device = device
 
     def make_grid(self, x: List[torch.Tensor]):
         # Form the meshgrid of points
-        x_mesh = torch.meshgrid(*x, indexing="ij")
+        x_mesh = torch.meshgrid(
+            *[x_elem.to(dtype=torch.float64, device=self.device) for x_elem in x],
+            indexing="ij",
+        )
         x_mesh = torch.stack(x_mesh, dim=-1)
         return x_mesh
 
@@ -43,11 +47,5 @@ class MLP(nn.Module):
         Returns:
             Tensor of shape (m1, m2, ..., m_ndim) - interpolated values
         """
-        # Form the meshgrid of points
-        out_shape = [sample.shape[0] for sample in x]
-        x_mesh = torch.meshgrid(*x, indexing="ij")
-        x_mesh = torch.stack(x_mesh, dim=-1)
-        x_mesh = x_mesh.reshape(-1, self.n_dim)
-        x_mesh = self.activation(self.fc1(x_mesh))
-        x_mesh = self.fc2(x_mesh)
-        return x_mesh.reshape(out_shape)
+        x_mesh = self.make_grid(x)
+        return self.forward_grid(x_mesh)

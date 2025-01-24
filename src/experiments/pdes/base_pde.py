@@ -70,19 +70,25 @@ class BasePDE:
     ) -> torch.Tensor:
         if type == "standard":
             if basis == "chebyshev":
-                cheb_nodes = torch.cos(torch.linspace(0, torch.pi, n_samples))
+                cheb_nodes = torch.cos(
+                    torch.linspace(0, torch.pi, n_samples, requires_grad=True)
+                )
                 return self._from_cheb(cheb_nodes, dim).to(self.device)
             elif basis == "fourier":
-                fourier_nodes = torch.linspace(0, 2 * torch.pi, n_samples + 1)[:-1]
+                fourier_nodes = torch.linspace(
+                    0, 2 * torch.pi, n_samples + 1, requires_grad=True
+                )[:-1]
                 return self._from_fourier(fourier_nodes, dim).to(self.device)
             else:
                 raise ValueError(f"Invalid basis: {basis}")
         elif type == "uniform":
             if basis == "chebyshev":
-                uniform_nodes = torch.cos(torch.rand(n_samples) * torch.pi)
+                uniform_nodes = torch.cos(
+                    torch.rand(n_samples), requires_grad=True * torch.pi
+                )
                 return self._from_cheb(uniform_nodes, dim).to(self.device)
             elif basis == "fourier":
-                uniform_nodes = torch.rand(n_samples) * 2 * torch.pi
+                uniform_nodes = torch.rand(n_samples, requires_grad=True) * 2 * torch.pi
                 return self._from_fourier(uniform_nodes, dim).to(self.device)
             else:
                 raise ValueError(f"Invalid basis: {basis}")
@@ -131,7 +137,6 @@ class BasePDE:
         print("Training model...")
         start_time = time()
         for epoch in tqdm(range(n_epochs)):
-
             # Sample points
             pde_nodes = pde_sampler()
             ic_nodes = ic_sampler()
