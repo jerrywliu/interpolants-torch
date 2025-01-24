@@ -11,7 +11,7 @@ from src.experiments.interpolation.simple_fcns.base_analytical_target import (
 )
 from src.models.interpolant_nd import SpectralInterpolationND
 from src.models.mlp import MLP
-from src.models.rational_1d import RationalInterpolation1D
+from src.models.rational_1d import RationalInterpolation1D, RationalInterpolationPoles1D
 
 
 class Logistic1DTarget(BaseAnalyticalTarget):
@@ -151,69 +151,93 @@ if __name__ == "__main__":
     n_eval = 200
     x_eval = torch.linspace(target.domain[0][0], target.domain[0][1], n_eval)
 
-    # 1. Neural network
-    save_dir = (
-        "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/logistic_1d/mlp"
-    )
-    model_mlp = MLP(n_dim=1, hidden_dim=32, activation=torch.tanh)
-    lr = 1e-3
-    optimizer = torch.optim.Adam(model_mlp.parameters(), lr=lr)
-    n_epochs = 10000
-    plot_every = 100
-    basis_type = "fourier"
-    sample_type = "uniform"
-    target.train_model(
-        model=model_mlp,
-        n_epochs=n_epochs,
-        optimizer=optimizer,
-        basis_type=basis_type,
-        sample_type=sample_type,
-        n_samples=n_samples,
-        x_eval=x_eval,
-        plot_every=plot_every,
-        save_dir=save_dir,
-    )
+    # # 1. Neural network
+    # save_dir = (
+    #     "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/logistic_1d/mlp"
+    # )
+    # model_mlp = MLP(n_dim=1, hidden_dim=32, activation=torch.tanh)
+    # lr = 1e-3
+    # optimizer = torch.optim.Adam(model_mlp.parameters(), lr=lr)
+    # n_epochs = 10000
+    # plot_every = 100
+    # basis_type = "fourier"
+    # sample_type = "uniform"
+    # target.train_model(
+    #     model=model_mlp,
+    #     n_epochs=n_epochs,
+    #     optimizer=optimizer,
+    #     basis_type=basis_type,
+    #     sample_type=sample_type,
+    #     n_samples=n_samples,
+    #     x_eval=x_eval,
+    #     plot_every=plot_every,
+    #     save_dir=save_dir,
+    # )
 
-    # 2. Polynomial interpolation
-    save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/logistic_1d/chebyshev"
-    n_x = 41
-    bases = ["chebyshev"]
-    domains = target.domain
-    model_cheb_uniform = SpectralInterpolationND(
-        Ns=[n_x],
-        bases=bases,
-        domains=domains,
-    )
-    lr = 1e-3
-    optimizer = torch.optim.Adam(model_cheb_uniform.parameters(), lr=lr)
-    n_epochs = 10000
-    plot_every = 100
-    basis_type = "chebyshev"
-    sample_type = "uniform"
-    target.train_model(
-        model=model_cheb_uniform,
-        n_epochs=n_epochs,
-        optimizer=optimizer,
-        basis_type=basis_type,
-        sample_type=sample_type,
-        n_samples=n_samples,
-        x_eval=x_eval,
-        plot_every=plot_every,
-        save_dir=save_dir,
-    )
+    # # 2. Polynomial interpolation
+    # save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/logistic_1d/chebyshev"
+    # n_x = 41
+    # bases = ["chebyshev"]
+    # domains = target.domain
+    # model_cheb_uniform = SpectralInterpolationND(
+    #     Ns=[n_x],
+    #     bases=bases,
+    #     domains=domains,
+    # )
+    # lr = 1e-3
+    # optimizer = torch.optim.Adam(model_cheb_uniform.parameters(), lr=lr)
+    # n_epochs = 10000
+    # plot_every = 100
+    # basis_type = "chebyshev"
+    # sample_type = "uniform"
+    # target.train_model(
+    #     model=model_cheb_uniform,
+    #     n_epochs=n_epochs,
+    #     optimizer=optimizer,
+    #     basis_type=basis_type,
+    #     sample_type=sample_type,
+    #     n_samples=n_samples,
+    #     x_eval=x_eval,
+    #     plot_every=plot_every,
+    #     save_dir=save_dir,
+    # )
 
-    # 3. Barycentric rational interpolation
-    save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/logistic_1d/rational"
+    # # 3. Barycentric rational interpolation
+    # save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/logistic_1d/rational"
+    # n_x = 21
+    # model_rational = RationalInterpolation1D(N=n_x, domain=target.domain[0])
+    # lr = 1e-3
+    # optimizer = torch.optim.Adam(model_rational.parameters(), lr=lr)
+    # n_epochs = 20000
+    # plot_every = 100
+    # basis_type = "chebyshev"
+    # sample_type = "standard"
+    # target.train_model(
+    #     model=model_rational,
+    #     n_epochs=n_epochs,
+    #     optimizer=optimizer,
+    #     basis_type=basis_type,
+    #     sample_type=sample_type,
+    #     n_samples=n_samples,
+    #     x_eval=x_eval,
+    #     plot_every=plot_every,
+    #     save_dir=save_dir,
+    # )
+
+    # 4. Barycentric rational interpolation with learnable poles
+    save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/logistic_1d/rational_poles"
     n_x = 21
-    model_rational = RationalInterpolation1D(N=n_x, domain=target.domain[0])
+    model_rational_poles = RationalInterpolationPoles1D(
+        N=n_x, domain=target.domain[0], num_poles=2
+    )
     lr = 1e-3
-    optimizer = torch.optim.Adam(model_rational.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(model_rational_poles.parameters(), lr=lr)
     n_epochs = 20000
     plot_every = 100
     basis_type = "chebyshev"
     sample_type = "standard"
     target.train_model(
-        model=model_rational,
+        model=model_rational_poles,
         n_epochs=n_epochs,
         optimizer=optimizer,
         basis_type=basis_type,
