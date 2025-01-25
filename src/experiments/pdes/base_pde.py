@@ -6,10 +6,19 @@ from torch.profiler import profile, record_function
 from tqdm import tqdm
 from typing import List, Tuple, Callable
 
+from src.optimizers.shampoo import Shampoo
+from src.optimizers.nys_newton_cg import NysNewtonCG
+
 
 class BasePDE:
     def __init__(
-        self, name: str, domain: List[Tuple[float, float]], device: str = "cpu"
+        self,
+        name: str,
+        domain: List[Tuple[float, float]],
+        device: str = "cpu",
+        loss_weight_update_policy: str = "grad_norm",
+        loss_weight_update_interval: int = -1,
+        loss_weight_max: float = 100.0,
     ):
         self.name = name
         self.device = torch.device(device)
@@ -35,9 +44,24 @@ class BasePDE:
             + (x / (2 * torch.pi)) * self.domain_lengths[d]
         )
 
+        self.loss_weights = {}
+        self.loss_weight_max = loss_weight_max
+        self.loss_weight_update_policy = loss_weight_update_policy
+        self.loss_weight_update_interval = loss_weight_update_interval
+
     # Input: x = [(n_1,), ..., (n_d,)]
     # Output: u = (n_1 * ... * n_d,)
     def get_solution(self, x: List[torch.Tensor]) -> torch.Tensor:
+        raise NotImplementedError
+
+    def get_loss_dict(
+        self,
+        model: nn.Module,
+        pde_nodes: List[torch.Tensor],
+        ic_nodes: List[torch.Tensor],  # [torch.tensor(0), nodes]
+        ic_weight: float = 1,
+        **kwargs,
+    ):
         raise NotImplementedError
 
     def get_pde_loss(
@@ -109,7 +133,67 @@ class BasePDE:
         raise NotImplementedError
 
     def maybe_update_loss_weights(self, epoch, model, optimizer, pde_nodes, ic_nodes):
-        pass
+        if (
+            self.loss_weight_update_interval == -1
+            or epoch % self.loss_weight_update_interval != 0
+        ):
+            return
+
+        loss_dict = self.get_loss_dict(model, pde_nodes, ic_nodes)
+        loss_names = loss_dict.keys()
+
+        if self.loss_weight_update_policy != "grad_norm":
+            return
+
+        self.loss_weights = {}
+        num_params = sum(p.numel() for p in model.parameters())
+
+        for loss_name in loss_names:
+            optimizer.zero_grad()
+            curr_loss = self.get_loss_dict(model, pde_nodes, ic_nodes)[loss_name]
+            optimizer.zero_grad()
+            curr_loss.backward(retain_graph=True)
+            curr_loss_avg_grad_norm = (
+                torch.sqrt(sum([torch.sum(p.grad**2) for p in model.parameters()]))
+                / num_params
+            )
+            self.loss_weights[f"{loss_name}_weight"] = min(
+                1.0 / curr_loss_avg_grad_norm, self.loss_weight_max
+            )
+
+        print(self.loss_weights)
+
+    def get_optimizer(self, model, optimizer_name, **override_kwargs):
+        optimizer_dict = {
+            "adam": {
+                "constructor": torch.optim.Adam,
+                "kwargs": {"lr": 1e-3},
+            },
+            "lbfgs": {
+                "constructor": torch.optim.LBFGS,
+                "kwargs": {"history_size": 1000},
+            },
+            "shampoo": {
+                "constructor": Shampoo,
+                "kwargs": {"lr": 1e-3, "update_freq": 1},
+            },
+            "nys_newton": {
+                "constructor": NysNewtonCG,
+                "kwargs": {
+                    "lr": 1.0,
+                    "rank": 100,
+                    "mu": 1e-4,
+                    "line_search_fn": "armijo",
+                },
+            },
+        }
+
+        entry = optimizer_dict[optimizer_name]
+        constructor = entry["constructor"]
+        kwargs = entry["kwargs"]
+        kwargs.update(override_kwargs)
+
+        return constructor(model.parameters(), **kwargs)
 
     def train_model(
         self,

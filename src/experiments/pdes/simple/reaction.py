@@ -12,9 +12,6 @@ from src.models.interpolant_nd import SpectralInterpolationND
 from src.models.mlp import MLP
 from src.utils.metrics import l2_error, max_error, l2_relative_error
 
-from src.optimizers.shampoo import Shampoo
-from src.optimizers.nys_newton_cg import NysNewtonCG
-
 """
 1D Reaction equation:
 u_t - rho * u(1-u) = 0
@@ -34,12 +31,10 @@ class Reaction(BasePDE):
         rho: float,
         t_final: float = 1,
         u_0: Callable = None,
-        loss_weight_update_policy: str = "grad_norm",
-        loss_weight_update_interval: int = -1,
-        loss_weight_max: float = 100.0,
         device: str = "cpu",
+        **base_kwargs,
     ):
-        super().__init__("reaction", [(0, 1), (0, 2 * torch.pi)])
+        super().__init__("reaction", [(0, 1), (0, 2 * torch.pi)], **base_kwargs)
         self.device = torch.device(device)
         self.rho = rho
         self.t_final = t_final
@@ -55,66 +50,9 @@ class Reaction(BasePDE):
             / (self.u_0(x) * torch.exp(self.rho * t) + (1 - self.u_0(x)))
         )
 
-        self.loss_weights = [1.0, 1.0, 1.0]
-        self.loss_weight_max = loss_weight_max
-        self.loss_weight_update_policy = loss_weight_update_policy
-        self.loss_weight_update_interval = loss_weight_update_interval
-
     def get_solution(self, nodes: List[torch.Tensor]):
         t_mesh, x_mesh = torch.meshgrid(nodes[0], nodes[1], indexing="ij")
         return self.exact_solution(t_mesh, x_mesh)
-
-    def maybe_update_loss_weights(self, epoch, model, optimizer, pde_nodes, ic_nodes):
-        if (
-            self.loss_weight_update_interval == -1
-            or epoch % self.loss_weight_update_interval != 0
-        ):
-            return
-
-        if self.loss_weight_update_policy == "grad_norm":
-            num_params = sum(p.numel() for p in model.parameters())
-
-            optimizer.zero_grad()
-            loss_dict = self.get_loss_dict(model, pde_nodes, ic_nodes)
-            pde_loss = loss_dict["pde_loss"]
-            optimizer.zero_grad()
-            pde_loss.backward(retain_graph=True)
-            avg_pde_loss_grad_norm = (
-                torch.sqrt(sum([torch.sum(p.grad**2) for p in model.parameters()]))
-                / num_params
-            )
-
-            optimizer.zero_grad()
-            loss_dict = self.get_loss_dict(model, pde_nodes, ic_nodes)
-            ic_loss = loss_dict["ic_loss"]
-            optimizer.zero_grad()
-            ic_loss.backward(retain_graph=True)
-            avg_ic_loss_grad_norm = (
-                torch.sqrt(sum([torch.sum(p.grad**2) for p in model.parameters()]))
-                / num_params
-            )
-
-            optimizer.zero_grad()
-            loss_dict = self.get_loss_dict(model, pde_nodes, ic_nodes)
-            pbc_loss = loss_dict["pbc_loss"]
-            optimizer.zero_grad()
-            pbc_loss.backward(retain_graph=True)
-            avg_pbc_loss_grad_norm = (
-                torch.sqrt(sum([torch.sum(p.grad**2) for p in model.parameters()]))
-                / num_params
-            )
-
-            self.loss_weights = [
-                1.0 / avg_pde_loss_grad_norm,
-                1.0 / avg_ic_loss_grad_norm,
-                1.0 / avg_pbc_loss_grad_norm,
-            ]
-
-            self.loss_weights = [
-                min(lw, self.loss_weight_max) for lw in self.loss_weights
-            ]
-
-            # print(self.loss_weights)
 
     def get_loss_dict(
         self,
@@ -172,19 +110,8 @@ class Reaction(BasePDE):
         # Periodic boundary conditions loss.
         pbc_loss = torch.mean((u_periodic_t0 - u_periodic_t1) ** 2)
 
-        # Total loss
-        pde_loss_weight = self.loss_weights[0]
-        ic_loss_weight = self.loss_weights[1]
-        pbc_loss_weight = self.loss_weights[1]
-
-        loss = (
-            (pde_loss_weight * pde_loss)
-            + (ic_weight * ic_loss_weight * ic_loss)
-            + (ic_weight * pbc_loss_weight * pbc_loss)
-        )
-        loss_names = "loss, pde_loss, ic_loss, pbc_loss".split(", ")
-
-        return dict(zip(loss_names, [loss, pde_loss, ic_loss, pbc_loss]))
+        loss_names = ["pde_loss", "ic_loss", "pbc_loss"]
+        return dict(zip(loss_names, [pde_loss, ic_loss, pbc_loss]))
 
     def get_pde_loss(
         self,
@@ -195,8 +122,19 @@ class Reaction(BasePDE):
         **kwargs,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         loss_dict = self.get_loss_dict(model, pde_nodes, ic_nodes, ic_weight)
+
+        pde_weight = self.loss_weights.get("pde_loss_weight", 1.0)
+        ic_weight = self.loss_weights.get("ic_loss_weight", 1.0)
+        pbc_weight = self.loss_weights.get("pbc_loss_weight", 1.0)
+
+        loss = (
+            (pde_weight * loss_dict["pde_loss"])
+            + (ic_weight * ic_weight * loss_dict["ic_loss"])
+            + (ic_weight * pbc_weight * loss_dict["pbc_loss"])
+        )
+
         return (
-            loss_dict["loss"],
+            loss,
             loss_dict["pde_loss"],
             loss_dict["ic_loss"] + loss_dict["pbc_loss"],
         )
@@ -303,39 +241,6 @@ class Reaction(BasePDE):
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             plt.savefig(save_path)
             plt.close()
-
-
-def get_optimizer(model, optimizer_name, **override_kwargs):
-    optimizer_dict = {
-        "adam": {
-            "constructor": torch.optim.Adam,
-            "kwargs": {"lr": 1e-3},
-        },
-        "lbfgs": {
-            "constructor": torch.optim.LBFGS,
-            "kwargs": {"history_size": 1000},
-        },
-        "shampoo": {
-            "constructor": Shampoo,
-            "kwargs": {"lr": 1e-3, "update_freq": 1},
-        },
-        "nys_newton": {
-            "constructor": NysNewtonCG,
-            "kwargs": {
-                "lr": 1.0,
-                "rank": 100,
-                "mu": 1e-4,
-                "line_search_fn": "armijo",
-            },
-        },
-    }
-
-    entry = optimizer_dict[optimizer_name]
-    constructor = entry["constructor"]
-    kwargs = entry["kwargs"]
-    kwargs.update(override_kwargs)
-
-    return constructor(model.parameters(), **kwargs)
 
 
 if __name__ == "__main__":
@@ -448,7 +353,7 @@ if __name__ == "__main__":
     save_dir = os.path.join(base_save_dir, "mlp")
     model_mlp = MLP(n_dim=2, hidden_dim=32, device=device, activation=torch.tanh)
 
-    optimizer = get_optimizer(model_mlp, args.method)
+    optimizer = pde.get_optimizer(model_mlp, args.method)
     pde.train_model(
         model=model_mlp,
         n_epochs=n_epochs,
@@ -472,7 +377,7 @@ if __name__ == "__main__":
     #     device=device,
     # )
 
-    # optimizer = get_optimizer(model_polynomial, args.method)
+    # optimizer = pde.get_optimizer(model_polynomial, args.method)
     # pde.train_model(
     #     model_polynomial,
     #     n_epochs=n_epochs,

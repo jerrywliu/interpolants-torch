@@ -3,13 +3,12 @@ import matplotlib.pyplot as plt
 import os
 import torch
 import torch.nn as nn
-from typing import List, Callable, Tuple
+from typing import List, Callable, Tuple, Dict
 
 from src.experiments.pdes.base_pde import BasePDE
+from src.models.mlp import MLP
 from src.models.interpolant_nd import SpectralInterpolationND
 from src.utils.metrics import l2_error, max_error, l2_relative_error
-
-from src.optimizers.nys_newton_cg import NysNewtonCG
 
 """
 1D Advection equation:
@@ -31,6 +30,7 @@ class Advection(BasePDE):
         t_final: float = 1,
         u_0: Callable = None,
         device: str = "cpu",
+        **base_kwargs,
     ):
         super().__init__("advection", [(0, 1), (0, 2 * torch.pi)], device=device)
         self.c = c
@@ -47,14 +47,14 @@ class Advection(BasePDE):
         x_mesh = x_mesh.to(device=nodes[0].device)
         return self.exact_solution(t_mesh, x_mesh)
 
-    def get_pde_loss(
+    def get_loss_dict(
         self,
         model: nn.Module,
         pde_nodes: List[torch.Tensor],
         ic_nodes: List[torch.Tensor],  # [torch.tensor(0), nodes]
         ic_weight: float = 1,
         **kwargs,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Dict[str, torch.Tensor]:
         if ic_nodes is None:
             ic_nodes = [torch.tensor([0.0]), pde_nodes[-1]]
 
@@ -70,14 +70,25 @@ class Advection(BasePDE):
             u_ic = model.interpolate(ic_nodes)[0]  # (N_ic)
         else:
             # PDE
-            u = model(pde_nodes).reshape(n_t, n_x)
-            grads = torch.autograd.grad(u.sum(), pde_nodes, create_graph=True)[
-                0
-            ]  # (N_t*N_x, 2)
-            u_t = grads[:, 0].reshape(n_t, n_x)
-            u_x = grads[:, 1].reshape(n_t, n_x)
+            grid = model.make_grid(pde_nodes)
+            u = model.forward_grid(grid).reshape(n_t, n_x)
+            grads = torch.autograd.grad(
+                u.sum(), grid, create_graph=True
+            )  # (N_t*N_x, 2)
+            u_t = grads[0][:, :, 0].reshape(n_t, n_x)
+            u_x = grads[0][:, :, 1].reshape(n_t, n_x)
             # IC
             u_ic = model(ic_nodes).reshape(n_ic)
+
+            # PDE Old.
+            # u = model(pde_nodes).reshape(n_t, n_x)
+            # grads = torch.autograd.grad(u.sum(), pde_nodes, create_graph=True)[
+            #     0
+            # ]  # (N_t*N_x, 2)
+            # u_t = grads[:, 0].reshape(n_t, n_x)
+            # u_x = grads[:, 1].reshape(n_t, n_x)
+            # # IC
+            # u_ic = model(ic_nodes).reshape(n_ic)
 
         # PDE loss
         pde_residual = u_t + self.c * u_x
@@ -85,9 +96,32 @@ class Advection(BasePDE):
         # IC loss
         ic_residual = u_ic - self.u_0(ic_nodes[1])
         ic_loss = torch.mean(ic_residual**2)
-        # Total loss
-        loss = pde_loss + ic_weight * ic_loss
-        return loss, pde_loss, ic_loss
+
+        loss_names = ["pde_loss", "ic_loss"]
+        return dict(zip(loss_names, [pde_loss, ic_loss]))
+
+    def get_pde_loss(
+        self,
+        model: nn.Module,
+        pde_nodes: List[torch.Tensor],
+        ic_nodes: List[torch.Tensor],  # [torch.tensor(0), nodes]
+        ic_weight: float = 1,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        loss_dict = self.get_loss_dict(model, pde_nodes, ic_nodes, ic_weight)
+
+        pde_weight = self.loss_weights.get("pde_loss_weight", 1.0)
+        ic_weight = self.loss_weights.get("ic_loss_weight", 1.0)
+
+        loss = (pde_weight * loss_dict["pde_loss"]) + (
+            ic_weight * ic_weight * loss_dict["ic_loss"]
+        )
+
+        return (
+            loss,
+            loss_dict["pde_loss"],
+            loss_dict["ic_loss"],
+        )
 
     # Get the least squares problem equivalent to a spectral solve
     def get_least_squares(self, model: SpectralInterpolationND):
@@ -152,7 +186,7 @@ class Advection(BasePDE):
         # True solution
         u_true = self.get_solution(nodes).cpu()
         im2 = ax2.imshow(
-            u_true.T,
+            u_true.detach().T.cpu().numpy(),
             extent=[
                 self.domain[0][0],
                 self.domain[0][1],
@@ -168,7 +202,7 @@ class Advection(BasePDE):
         # Error on log scale
         error = torch.abs(u_cpu - u_true)
         im3 = ax3.imshow(
-            error.T,
+            error.detach().T.cpu().numpy(),
             extent=[
                 self.domain[0][0],
                 self.domain[0][1],
@@ -191,6 +225,7 @@ class Advection(BasePDE):
 
 
 if __name__ == "__main__":
+    args = argparse.ArgumentParser()
 
     args = argparse.ArgumentParser()
     args.add_argument("--c", type=int, default=80)
@@ -199,6 +234,12 @@ if __name__ == "__main__":
     args.add_argument("--sample_type", type=str, default="standard")
     args.add_argument("--method", type=str, default="adam")
     args.add_argument("--n_epochs", type=int, default=100000)
+
+    # lwup is one of [grad_norm, none].
+    args.add_argument("--loss_weight_update_policy", "-lwup", type=str, default="none")
+    args.add_argument("--loss_weight_update_interval", "-lwui", type=int, default=-1)
+    args.add_argument("--loss_weight_max", "-lmw", type=float, default=100.0)
+
     args = args.parse_args()
 
     torch.set_default_dtype(torch.float64)
@@ -207,59 +248,49 @@ if __name__ == "__main__":
     # Problem setup
     c = args.c
     t_final = 1
-    u_0 = lambda x: torch.sin(x)
-    pde = Advection(c=c, t_final=t_final, u_0=u_0, device=device)
-    save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/advection/c={c}_method={args.method}_n_t={args.n_t}_n_x={args.n_x}"
+    u_0 = torch.sin
+    pde = Advection(
+        c=c,
+        t_final=t_final,
+        u_0=u_0,
+        device=device,
+        loss_weight_update_policy=args.loss_weight_update_policy,
+        loss_weight_update_interval=args.loss_weight_update_interval,
+        loss_weight_max=args.loss_weight_max,
+    )
 
-    # Eval
+    base_save_dir = "/common/results/pdes/advection"
+    # base_save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/advection"
+    base_save_dir = os.path.join(
+        base_save_dir, f"c={c}_method={args.method}_n_t={args.n_t}_n_x={args.n_x}"
+    )
+
+    # Evaluation setup
     n_eval = 200
-    t_eval = torch.linspace(pde.domain[0][0], pde.domain[0][1], n_eval).to(device)
-    x_eval = torch.linspace(pde.domain[1][0], pde.domain[1][1], n_eval + 1)[:-1].to(
-        device
+    t_eval = torch.linspace(
+        pde.domain[0][0], pde.domain[0][1], n_eval, device=device, requires_grad=True
     )
-
-    # Baseline: least squares
-    print("Fitting model with least squares...")
-    n_t_ls = args.n_t if args.n_t is not None else c + 1
-    n_x_ls = args.n_x if args.n_x is not None else c
-    bases_ls = ["chebyshev", "fourier"]
-    model_ls = SpectralInterpolationND(
-        Ns=[n_t_ls, n_x_ls],
-        bases=bases_ls,
-        domains=pde.domain,
+    x_eval = torch.linspace(
+        pde.domain[1][0],
+        pde.domain[1][1],
+        n_eval + 1,
         device=device,
-    )
-    model_ls = pde.fit_least_squares(model_ls)
-    pde.plot_solution(
-        [t_eval, x_eval],
-        model_ls.interpolate([t_eval, x_eval]),
-        save_path=os.path.join(save_dir, "advection_ls_solution.png"),
-    )
-
-    # Model setup
-    print("Training model with first-order method...")
-    n_t = args.n_t if args.n_t is not None else c + 1
-    n_x = args.n_x if args.n_x is not None else c
-    bases = ["chebyshev", "fourier"]
-    model = SpectralInterpolationND(
-        Ns=[n_t, n_x],
-        bases=bases,
-        domains=pde.domain,
-        device=device,
-    )
+        requires_grad=True,
+    )[:-1]
 
     # Training setup
     n_epochs = args.n_epochs
     plot_every = 1000
-    lr = 1e-3
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
     # PDE
+    bases = ["chebyshev", "fourier"]
     if args.sample_type == "standard":
         sample_type = ["standard", "standard"]
     elif args.sample_type == "uniform":
         sample_type = ["uniform", "uniform"]
     else:
         raise ValueError(f"Invalid sample type: {args.sample_type}")
+
     n_t_train = 2 * c + 1
     n_x_train = 2 * c
     n_ic_train = 2 * c
@@ -287,60 +318,73 @@ if __name__ == "__main__":
             basis=bases[1],
             type=sample_type[1],
         )
-        return [torch.tensor([0.0]).to(device), ic_nodes]
+        return [torch.tensor([0.0], requires_grad=True, device=device), ic_nodes]
 
     def eval_sampler():
         return t_eval, x_eval
 
     eval_metrics = [l2_error, max_error, l2_relative_error]
 
-    if args.method == "adam":
-        # Train model with Adam
-        pde.train_model(
-            model,
-            n_epochs=n_epochs,
-            optimizer=optimizer,
-            pde_sampler=pde_sampler,
-            ic_sampler=ic_sampler,
-            ic_weight=ic_weight,
-            eval_sampler=eval_sampler,
-            eval_metrics=eval_metrics,
-            plot_every=plot_every,
-            save_dir=save_dir,
-        )
-    elif args.method == "lbfgs":
-        # Train model with L-BFGS
-        optimizer = torch.optim.LBFGS(model.parameters())
-        pde.train_model_lbfgs(
-            model,
-            max_iter=n_epochs,
-            optimizer=optimizer,
-            pde_sampler=pde_sampler,
-            ic_sampler=ic_sampler,
-            ic_weight=ic_weight,
-            eval_sampler=eval_sampler,
-            eval_metrics=eval_metrics,
-            plot_every=100,
-            save_dir=save_dir,
-        )
-    elif args.method == "nys_newton":
-        # Train model with Nys-Newton
-        optimizer = NysNewtonCG(
-            model.parameters(),
-            lr=1.0,
-            rank=100,  # rank of Nyström approximation
-            mu=1e-4,  # damping parameter
-            line_search_fn="armijo",
-        )
-        pde.train_model_nys_newton(
-            model,
-            max_iter=n_epochs,
-            optimizer=optimizer,
-            pde_sampler=pde_sampler,
-            ic_sampler=ic_sampler,
-            ic_weight=ic_weight,
-            eval_sampler=eval_sampler,
-            eval_metrics=eval_metrics,
-            plot_every=10,
-            save_dir=save_dir,
-        )
+    # 1. Least Squares Polynomial Interpolant
+    # save_dir = os.path.join(base_save_dir, "polynomial_least_squares")
+    # print("Fitting model with least squares...")
+    # n_t_ls = args.n_t if args.n_t is not None else c + 1
+    # n_x_ls = args.n_x if args.n_x is not None else c
+    # bases_ls = ["chebyshev", "fourier"]
+    # model_ls = SpectralInterpolationND(
+    #     Ns=[n_t_ls, n_x_ls],
+    #     bases=bases_ls,
+    #     domains=pde.domain,
+    #     device=device,
+    # )
+    # model_ls = pde.fit_least_squares(model_ls)
+    # pde.plot_solution(
+    #     [t_eval, x_eval],
+    #     model_ls.interpolate([t_eval, x_eval]),
+    #     save_path=os.path.join(save_dir, "advection_ls_solution.png"),
+    # )
+
+    # 2. Neural network
+    # save_dir = os.path.join(base_save_dir, "mlp")
+    # model_mlp = MLP(n_dim=2, hidden_dim=32, device=device, activation=torch.tanh)
+
+    # optimizer = pde.get_optimizer(model_mlp, args.method)
+    # pde.train_model(
+    #     model=model_mlp,
+    #     n_epochs=n_epochs,
+    #     optimizer=optimizer,
+    #     pde_sampler=pde_sampler,
+    #     ic_sampler=ic_sampler,
+    #     ic_weight=ic_weight,
+    #     eval_sampler=eval_sampler,
+    #     eval_metrics=eval_metrics,
+    #     plot_every=plot_every,
+    #     save_dir=save_dir,
+    # )
+
+    # 3. Polynomial Interpolant
+    save_dir = os.path.join(base_save_dir, "polynomial")
+
+    n_t = args.n_t if args.n_t is not None else c + 1
+    n_x = args.n_x if args.n_x is not None else c
+    bases = ["chebyshev", "fourier"]
+    model_polynomial = SpectralInterpolationND(
+        Ns=[n_t, n_x],
+        bases=bases,
+        domains=pde.domain,
+        device=device,
+    )
+
+    optimizer = pde.get_optimizer(model_polynomial, args.method)
+    pde.train_model(
+        model_polynomial,
+        n_epochs=n_epochs,
+        optimizer=optimizer,
+        pde_sampler=pde_sampler,
+        ic_sampler=ic_sampler,
+        ic_weight=ic_weight,
+        eval_sampler=eval_sampler,
+        eval_metrics=eval_metrics,
+        plot_every=plot_every,
+        save_dir=save_dir,
+    )
