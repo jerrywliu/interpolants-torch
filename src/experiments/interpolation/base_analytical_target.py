@@ -8,6 +8,7 @@ from typing import Callable, List, Tuple
 
 from src.experiments.base_fcn import BaseFcn
 from src.loggers.logger import Logger
+from src.optimizers.nys_newton_cg import NysNewtonCG
 
 
 class BaseAnalyticalTarget(BaseFcn):
@@ -135,8 +136,189 @@ class BaseAnalyticalTarget(BaseFcn):
         plt.savefig(os.path.join(save_dir, "loss_history.png"))
         plt.close()
 
+    def train_model_lbfgs(
+        self,
+        model: nn.Module,
+        n_epochs: int,
+        optimizer: torch.optim.LBFGS,
+        train_sampler: Callable,
+        eval_sampler: Callable,
+        eval_metrics: List[Callable],
+        eval_every: int = 100,
+        save_dir: str = None,
+        logger: Logger = None,
+    ):
+        if logger is None:
+            logger = Logger(path=os.path.join(save_dir, "logger.json"))
 
-# TODO JL 1/24/25: Add L-BFGS, Nyström Newton-CG. Wrap within self.train.
+        # Sample points once since L-BFGS works better with fixed points
+        train_nodes = train_sampler()
+        eval_nodes = eval_sampler()
+
+        print("Training model with L-BFGS...")
+        start_time = time()
+
+        # Define closure for L-BFGS
+        def closure():
+            optimizer.zero_grad()
+            loss = self.get_loss(model, train_nodes)
+            loss.backward()
+            return loss
+
+        # Training loop
+        for epoch in tqdm(range(n_epochs)):
+            # Optimize
+            loss = optimizer.step(closure)
+
+            # Log
+            logger.log("loss", loss.item(), epoch)
+
+            # Eval, print, and plot progress
+            if (epoch + 1) % eval_every == 0:
+                with torch.no_grad():
+                    u_eval = model(eval_nodes)
+                    u_true = self.get_function(eval_nodes)
+                    for eval_metric in eval_metrics:
+                        eval_metric_value = eval_metric(u_eval, u_true)
+                        logger.log(
+                            f"eval_{eval_metric.__name__}", eval_metric_value, epoch
+                        )
+
+                    eval_loss = self.get_loss(model, eval_nodes)
+                    logger.log("eval_loss", eval_loss.item(), epoch)
+
+                current_time = time() - start_time
+                print(f"Iteration {epoch + 1} completed in {current_time:.2f} seconds")
+                print(f"Loss: {logger.get_most_recent_value('loss'):1.3e}")
+                self.plot_solution(
+                    eval_nodes,
+                    u_eval,
+                    save_path=os.path.join(save_dir, f"{self.name}_{epoch}.png"),
+                )
+
+                # Save history
+                logger.save()
+
+    def train_model_nys_newton(
+        self,
+        model: nn.Module,
+        n_epochs: int,
+        optimizer: NysNewtonCG,
+        train_sampler: Callable,
+        eval_sampler: Callable,
+        eval_metrics: List[Callable],
+        eval_every: int = 100,
+        save_dir: str = None,
+        logger: Logger = None,
+    ):
+        if logger is None:
+            logger = Logger(path=os.path.join(save_dir, "logger.json"))
+
+        # Sample points once since Newton methods work better with fixed points
+        train_nodes = train_sampler()
+        eval_nodes = eval_sampler()
+
+        print("Training model with Nyström Newton-CG...")
+        start_time = time()
+
+        # Define closure for NysNewtonCG that returns both loss and gradient
+        def closure():
+            optimizer.zero_grad()
+            loss = self.get_loss(model, train_nodes)
+            # Compute gradient with create_graph=True for Hessian computation
+            grads = torch.autograd.grad(loss, model.parameters(), create_graph=True)
+
+            # Make gradients contiguous
+            grads = [g.contiguous() for g in grads]
+
+            # Update preconditioner every iteration
+            optimizer.update_preconditioner(grads)
+
+            return loss, grads
+
+        # Training loop
+        for epoch in tqdm(range(n_epochs)):
+            # Optimize
+            loss, _ = optimizer.step(closure)
+
+            # Log
+            logger.log("loss", loss.item(), epoch)
+
+            # Eval, print, and plot progress
+            if (epoch + 1) % eval_every == 0:
+                with torch.no_grad():
+                    u_eval = model(eval_nodes)
+                    u_true = self.get_function(eval_nodes)
+                    for eval_metric in eval_metrics:
+                        eval_metric_value = eval_metric(u_eval, u_true)
+                        logger.log(
+                            f"eval_{eval_metric.__name__}", eval_metric_value, epoch
+                        )
+
+                    eval_loss = self.get_loss(model, eval_nodes)
+                    logger.log("eval_loss", eval_loss.item(), epoch)
+
+                current_time = time() - start_time
+                print(f"Iteration {epoch + 1} completed in {current_time:.2f} seconds")
+                print(f"Loss: {logger.get_most_recent_value('loss'):1.3e}")
+                self.plot_solution(
+                    eval_nodes,
+                    u_eval,
+                    save_path=os.path.join(save_dir, f"{self.name}_{epoch}.png"),
+                )
+
+                # Save history
+                logger.save()
+
+    def train(
+        self,
+        model: nn.Module,
+        n_epochs: int,
+        optimizer: torch.optim.Optimizer,
+        train_sampler: Callable,
+        eval_sampler: Callable,
+        eval_metrics: List[Callable],
+        eval_every: int = 100,
+        save_dir: str = None,
+        logger: Logger = None,
+    ):
+        """Routes to appropriate training method based on optimizer type"""
+        if isinstance(optimizer, NysNewtonCG):
+            self.train_model_nys_newton(
+                model,
+                n_epochs,
+                optimizer,
+                train_sampler,
+                eval_sampler,
+                eval_metrics,
+                eval_every,
+                save_dir,
+                logger,
+            )
+        elif isinstance(optimizer, torch.optim.LBFGS):
+            self.train_model_lbfgs(
+                model,
+                n_epochs,
+                optimizer,
+                train_sampler,
+                eval_sampler,
+                eval_metrics,
+                eval_every,
+                save_dir,
+                logger,
+            )
+        else:
+            self.train_model(
+                model,
+                n_epochs,
+                optimizer,
+                train_sampler,
+                eval_sampler,
+                eval_metrics,
+                eval_every,
+                save_dir,
+                logger,
+            )
 
 
 if __name__ == "__main__":

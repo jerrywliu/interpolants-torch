@@ -5,7 +5,6 @@ import torch.nn as nn
 from tqdm import tqdm
 from typing import List, Tuple, Callable
 
-from src.optimizers.shampoo import Shampoo
 from src.optimizers.nys_newton_cg import NysNewtonCG
 
 from src.experiments.base_fcn import BaseFcn
@@ -114,38 +113,6 @@ class BasePDE(BaseFcn):
             )
 
         print(self.loss_weights)
-
-    def get_optimizer(self, model, optimizer_name, **override_kwargs):
-        optimizer_dict = {
-            "adam": {
-                "constructor": torch.optim.Adam,
-                "kwargs": {"lr": 1e-3},
-            },
-            "lbfgs": {
-                "constructor": torch.optim.LBFGS,
-                "kwargs": {"history_size": 1000},
-            },
-            "shampoo": {
-                "constructor": Shampoo,
-                "kwargs": {"lr": 1e-3, "update_freq": 1},
-            },
-            "nys_newton": {
-                "constructor": NysNewtonCG,
-                "kwargs": {
-                    "lr": 1.0,
-                    "rank": 100,
-                    "mu": 1e-4,
-                    "line_search_fn": "armijo",
-                },
-            },
-        }
-
-        entry = optimizer_dict[optimizer_name]
-        constructor = entry["constructor"]
-        kwargs = entry["kwargs"]
-        kwargs.update(override_kwargs)
-
-        return constructor(model.parameters(), **kwargs)
 
     def train_model(
         self,
@@ -383,7 +350,7 @@ class BasePDE(BaseFcn):
 
                 # Evaluate solution
                 with torch.no_grad():
-                    u_eval = model.interpolate(eval_nodes)
+                    u_eval = model(eval_nodes)
                     u_true = self.get_solution(eval_nodes)
                     for eval_metric in eval_metrics:
                         eval_metric_value = eval_metric(u_eval, u_true)

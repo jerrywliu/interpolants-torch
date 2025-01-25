@@ -252,8 +252,8 @@ if __name__ == "__main__":
 
     # Training setup
     n_epochs = args.n_epochs
-    lr = 1e-3
-    optimizer = torch.optim.Adam(model_mlp.parameters(), lr=lr)
+    # lr = 1e-3
+    optimizer = pde.get_optimizer(model_mlp, args.method)
 
     n_t_train = 2 * c + 1
     n_x_train = 2 * c
@@ -318,8 +318,8 @@ if __name__ == "__main__":
 
     # Training setup
     n_epochs = args.n_epochs
-    lr = 1e-3
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    # lr = 1e-3
+    optimizer = pde.get_optimizer(model, args.method)
 
     n_t_train = 2 * c + 1
     n_x_train = 2 * c

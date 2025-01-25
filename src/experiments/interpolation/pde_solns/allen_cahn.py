@@ -10,7 +10,7 @@ import torch.nn as nn
 from tqdm import tqdm
 from typing import Callable
 
-from src.experiments.interpolation.simple_fcns.base_analytical_target import (
+from src.experiments.interpolation.base_analytical_target import (
     BaseAnalyticalTarget,
 )
 from src.models.interpolant_nd import SpectralInterpolationND
@@ -103,9 +103,9 @@ class AllenCahnTarget(BaseAnalyticalTarget):
             + "chebyshev for x."
         )
 
-        assert t_sample_type == "standard" and x_sample_type == "standard", (
-            "Allen-cahn data was generated with standard sample type."
-        )
+        assert (
+            t_sample_type == "standard" and x_sample_type == "standard"
+        ), "Allen-cahn data was generated with standard sample type."
 
         # Train / eval split.
 

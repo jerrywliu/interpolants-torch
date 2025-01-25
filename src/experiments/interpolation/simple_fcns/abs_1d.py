@@ -42,6 +42,7 @@ if __name__ == "__main__":
 
     args = argparse.ArgumentParser()
     args.add_argument("--sample_type", type=str, default="standard")
+    args.add_argument("--method", type=str, default="adam")
     args.add_argument("--n_epochs", type=int, default=10000)
     args.add_argument("--eval_every", type=int, default=100)
     args = args.parse_args()
@@ -74,7 +75,7 @@ if __name__ == "__main__":
     #########################################################
     save_dir = os.path.join(base_save_dir, "mlp")
     n_epochs = args.n_epochs
-    lr = 1e-3
+    # lr = 1e-3
     n_samples = 41
     basis_type = "fourier"
     sample_type = args.sample_type
@@ -87,10 +88,10 @@ if __name__ == "__main__":
         )
 
     model_mlp = MLP(n_dim=1, hidden_dim=32, activation=torch.tanh, device=device)
-    optimizer = torch.optim.Adam(model_mlp.parameters(), lr=lr)
+    optimizer = target.get_optimizer(model_mlp, args.method)
     logger = Logger(path=os.path.join(save_dir, "logger.json"))
 
-    target.train_model(
+    target.train(
         model=model_mlp,
         n_epochs=n_epochs,
         optimizer=optimizer,
@@ -107,7 +108,7 @@ if __name__ == "__main__":
     #########################################################
     save_dir = os.path.join(base_save_dir, "chebyshev")
     n_epochs = args.n_epochs
-    lr = 1e-3
+    # lr = 1e-3
     n_samples = 41
     basis_type = "chebyshev"
     sample_type = args.sample_type
@@ -128,10 +129,10 @@ if __name__ == "__main__":
         domains=domains,
         device=device,
     )
-    optimizer = torch.optim.Adam(model_cheb_uniform.parameters(), lr=lr)
+    optimizer = target.get_optimizer(model_cheb_uniform, args.method)
     logger = Logger(path=os.path.join(save_dir, "logger.json"))
 
-    target.train_model(
+    target.train(
         model=model_cheb_uniform,
         n_epochs=n_epochs,
         optimizer=optimizer,
@@ -148,7 +149,7 @@ if __name__ == "__main__":
     #########################################################
     save_dir = os.path.join(base_save_dir, "rational")
     n_epochs = args.n_epochs
-    lr = 1e-3
+    # lr = 1e-3
     n_samples = 41
     basis_type = "chebyshev"
     sample_type = args.sample_type
@@ -166,10 +167,10 @@ if __name__ == "__main__":
         domain=target.domain[0],
         device=device,
     )
-    optimizer = torch.optim.Adam(model_rational.parameters(), lr=lr)
+    optimizer = target.get_optimizer(model_rational, args.method)
     logger = Logger(path=os.path.join(save_dir, "logger.json"))
 
-    target.train_model(
+    target.train(
         model=model_rational,
         n_epochs=n_epochs,
         optimizer=optimizer,

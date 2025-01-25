@@ -38,8 +38,8 @@ if __name__ == "__main__":
 
     args = argparse.ArgumentParser()
     args.add_argument("--c", type=int, default=80)
-    args.add_argument("--n_t", type=int, default=41)
-    args.add_argument("--n_x", type=int, default=41)
+    args.add_argument("--n_t", type=int, default=81)
+    args.add_argument("--n_x", type=int, default=81)
     args.add_argument("--sample_type", type=str, default="uniform")
     args.add_argument("--n_epochs", type=int, default=10000)
     args.add_argument("--eval_every", type=int, default=100)
