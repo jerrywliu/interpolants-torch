@@ -1,141 +1,36 @@
-import matplotlib.pyplot as plt
+import argparse
 import os
-from time import time
 import torch
-import torch.nn as nn
-from tqdm import tqdm
-from typing import Callable
+from typing import List
 
-from src.experiments.interpolation.simple_fcns.base_analytical_target import (
+from src.experiments.interpolation.base_analytical_target import (
     BaseAnalyticalTarget,
 )
 from src.models.interpolant_nd import SpectralInterpolationND
 from src.models.mlp import MLP
 from src.models.rational_1d import RationalInterpolation1D
+from src.utils.metrics import l2_error, max_error, l2_relative_error
+from src.loggers.logger import Logger
 
 
 class Abs1DTarget(BaseAnalyticalTarget):
-    def __init__(self):
+    def __init__(self, device: str = "cpu"):
         super().__init__(
             "abs_1d",
             f=lambda x: torch.abs(x),
             domain=[(-1, 1)],
             derivative=lambda x: torch.sign(x),
             second_derivative=lambda x: torch.zeros_like(x),
+            device=device,
         )
 
-    def plot_comparison(
+    def plot_solution(
         self,
-        train_points: torch.Tensor,  # (N_train, 1)
-        eval_points: torch.Tensor,  # (N_eval, 1)
-        train_values: torch.Tensor,  # (N_train, 1)
-        eval_values: torch.Tensor,  # (N_eval, 1)
+        nodes: List[torch.Tensor],
+        u: torch.Tensor,
         save_path: str = None,
-        f: Callable = None,
     ):
-        # Create a figure with 1x2 subplots
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
-
-        # Get true values for comparison
-        if f is None:
-            true_values = self.f(eval_points)
-        else:
-            true_values = f(eval_points)
-
-        # Left subplot: True vs Predicted
-        ax1.plot(eval_points, true_values, "k:", label="True function")
-        ax1.plot(eval_points, eval_values, "b-", label="Predicted")
-        ax1.plot(train_points, train_values, "ro", label="Training points")
-        ax1.set_title("True vs Predicted")
-        ax1.legend()
-        ax1.grid(True)
-
-        # Right subplot: Error (log scale)
-        errors = torch.abs(eval_values - true_values)
-        ax2.semilogy(eval_points, errors, "b-", label="Absolute Error")
-        ax2.set_title("Absolute Error (log scale)")
-        ax2.legend()
-        ax2.grid(True)
-
-        # Adjust layout to prevent overlap
-        plt.tight_layout()
-
-        if save_path:
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            plt.savefig(save_path)
-            plt.close()
-
-    def train_model(
-        self,
-        model: nn.Module,
-        n_epochs: int,
-        optimizer: torch.optim.Optimizer,
-        basis_type: str,  # "chebyshev" or "fourier"
-        sample_type: str,  # standard or uniform
-        n_samples: int,
-        x_eval: torch.Tensor,
-        plot_every: int = 100,
-        save_dir: str = None,
-    ):
-        # Training history
-        history = {
-            "loss": [],
-            "eval_l2_error": [],
-            "eval_max_error": [],
-        }
-        loss_fn = nn.MSELoss()
-
-        print("Training model...")
-        start_time = time()
-        for epoch in tqdm(range(n_epochs)):
-            # Sample points
-            x_train = self.sample_domain_1d(
-                n_samples=n_samples,
-                dim=0,
-                basis=basis_type,
-                type=sample_type,
-            )
-            f_train_pred = model([x_train])
-            f_train_true = self.get_function(x_train)
-
-            # Train step
-            optimizer.zero_grad()
-            loss = loss_fn(f_train_pred, f_train_true)
-            loss.backward()
-            optimizer.step()
-
-            # Evaluate solution
-            f_eval_pred = model([x_eval]).detach()
-            f_eval_true = self.get_function(x_eval)
-            eval_l2_error = torch.mean((f_eval_pred - f_eval_true) ** 2)
-            eval_max_error = torch.max(torch.abs(f_eval_pred - f_eval_true))
-
-            # Update history
-            history["loss"].append(loss.item())
-            history["eval_l2_error"].append(eval_l2_error.item())
-            history["eval_max_error"].append(eval_max_error.item())
-
-            # Print and plot progress
-            if (epoch + 1) % plot_every == 0:
-                current_time = time() - start_time
-                print(f"Epoch {epoch + 1} completed in {current_time:.2f} seconds")
-                print(f"Evaluation L2 error: {history['eval_l2_error'][-1]:1.3e}")
-                self.plot_comparison(
-                    x_train,
-                    x_eval,
-                    f_train_true,
-                    f_eval_pred,
-                    save_path=os.path.join(save_dir, f"abs_1d_solution_{epoch}.png"),
-                )
-
-        # Plot loss history
-        plt.figure()
-        plt.semilogy(history["loss"], label="Loss")
-        plt.semilogy(history["eval_l2_error"], label="Eval L2 Error")
-        plt.semilogy(history["eval_max_error"], label="Eval Max Error")
-        plt.legend()
-        plt.savefig(os.path.join(save_dir, "loss_history.png"))
-        plt.close()
+        self._plot_solution_default(nodes, u, save_path)
 
 
 # Compare interpolation of abs(x) using different methods:
@@ -145,41 +40,85 @@ class Abs1DTarget(BaseAnalyticalTarget):
 
 if __name__ == "__main__":
 
+    args = argparse.ArgumentParser()
+    args.add_argument("--sample_type", type=str, default="standard")
+    args.add_argument("--n_epochs", type=int, default=10000)
+    args.add_argument("--eval_every", type=int, default=100)
+    args = args.parse_args()
+
+    torch.random.manual_seed(0)
     torch.set_default_dtype(torch.float64)
+    device = "cuda"
 
     # Problem setup
-    target = Abs1DTarget()
-    n_samples = 51
+    target = Abs1DTarget(device=device)
+
+    base_save_dir = (
+        f"/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/abs_1d"
+    )
+
+    # Evaluation setup (shared for all methods)
+    eval_every = args.eval_every
     n_eval = 200
-    x_eval = torch.linspace(target.domain[0][0], target.domain[0][1], n_eval)
+    x_eval = torch.linspace(
+        target.domain[0][0], target.domain[0][1], n_eval, device=device
+    )
 
-    n_epochs = 2_500
+    def eval_sampler():
+        return [x_eval]
 
+    eval_metrics = [l2_error, max_error, l2_relative_error]
+
+    #########################################################
     # 1. Neural network
-    save_dir = "/common/results/interpolants-torch/interpolation/abs_1d/mlp"
-    model_mlp = MLP(n_dim=1, hidden_dim=32, activation=torch.tanh)
+    #########################################################
+    save_dir = os.path.join(base_save_dir, "mlp")
+    n_epochs = args.n_epochs
     lr = 1e-3
-    optimizer = torch.optim.Adam(model_mlp.parameters(), lr=lr)
-    # n_epochs = 10000
-    plot_every = 100
+    n_samples = 41
     basis_type = "fourier"
-    sample_type = "uniform"
+    sample_type = args.sample_type
+
+    def train_sampler():
+        return target.sample_domain(
+            n_samples,
+            basis=[basis_type],
+            type=[sample_type],
+        )
+
+    model_mlp = MLP(n_dim=1, hidden_dim=32, activation=torch.tanh, device=device)
+    optimizer = torch.optim.Adam(model_mlp.parameters(), lr=lr)
+    logger = Logger(path=os.path.join(save_dir, "logger.json"))
+
     target.train_model(
         model=model_mlp,
         n_epochs=n_epochs,
         optimizer=optimizer,
-        basis_type=basis_type,
-        sample_type=sample_type,
-        n_samples=n_samples,
-        x_eval=x_eval,
-        plot_every=plot_every,
+        train_sampler=train_sampler,
+        eval_sampler=eval_sampler,
+        eval_metrics=eval_metrics,
+        eval_every=eval_every,
         save_dir=save_dir,
+        logger=logger,
     )
 
+    #########################################################
     # 2. Polynomial interpolation
-    save_dir = (
-        "/common/results/interpolants-torch/interpolation/abs_1d/chebyshev"
-    )
+    #########################################################
+    save_dir = os.path.join(base_save_dir, "chebyshev")
+    n_epochs = args.n_epochs
+    lr = 1e-3
+    n_samples = 41
+    basis_type = "chebyshev"
+    sample_type = args.sample_type
+
+    def train_sampler():
+        return target.sample_domain(
+            n_samples,
+            basis=[basis_type],
+            type=[sample_type],
+        )
+
     n_x = 41
     bases = ["chebyshev"]
     domains = target.domain
@@ -187,45 +126,57 @@ if __name__ == "__main__":
         Ns=[n_x],
         bases=bases,
         domains=domains,
+        device=device,
     )
-    lr = 1e-3
     optimizer = torch.optim.Adam(model_cheb_uniform.parameters(), lr=lr)
-    # n_epochs = 10000
-    plot_every = 100
-    basis_type = "chebyshev"
-    sample_type = "uniform"
+    logger = Logger(path=os.path.join(save_dir, "logger.json"))
+
     target.train_model(
         model=model_cheb_uniform,
         n_epochs=n_epochs,
         optimizer=optimizer,
-        basis_type=basis_type,
-        sample_type=sample_type,
-        n_samples=n_samples,
-        x_eval=x_eval,
-        plot_every=plot_every,
+        train_sampler=train_sampler,
+        eval_sampler=eval_sampler,
+        eval_metrics=eval_metrics,
+        eval_every=eval_every,
         save_dir=save_dir,
+        logger=logger,
     )
 
+    #########################################################
     # 3. Barycentric rational interpolation
-    save_dir = (
-        "/common/results/interpolants-torch/interpolation/abs_1d/rational"
-    )
-    n_x = 21
-    model_rational = RationalInterpolation1D(N=n_x, domain=target.domain[0])
+    #########################################################
+    save_dir = os.path.join(base_save_dir, "rational")
+    n_epochs = args.n_epochs
     lr = 1e-3
-    optimizer = torch.optim.Adam(model_rational.parameters(), lr=lr)
-    # n_epochs = 20000
-    plot_every = 100
+    n_samples = 41
     basis_type = "chebyshev"
-    sample_type = "standard"
+    sample_type = args.sample_type
+
+    def train_sampler():
+        return target.sample_domain(
+            n_samples,
+            basis=[basis_type],
+            type=[sample_type],
+        )
+
+    n_x = 21
+    model_rational = RationalInterpolation1D(
+        N=n_x,
+        domain=target.domain[0],
+        device=device,
+    )
+    optimizer = torch.optim.Adam(model_rational.parameters(), lr=lr)
+    logger = Logger(path=os.path.join(save_dir, "logger.json"))
+
     target.train_model(
         model=model_rational,
         n_epochs=n_epochs,
         optimizer=optimizer,
-        basis_type=basis_type,
-        sample_type=sample_type,
-        n_samples=n_samples,
-        x_eval=x_eval,
-        plot_every=plot_every,
+        train_sampler=train_sampler,
+        eval_sampler=eval_sampler,
+        eval_metrics=eval_metrics,
+        eval_every=eval_every,
         save_dir=save_dir,
+        logger=logger,
     )

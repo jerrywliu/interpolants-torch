@@ -4,7 +4,13 @@ from typing import List
 
 
 class MLP(nn.Module):
-    def __init__(self, n_dim=1, hidden_dim=32, device="cpu", activation=torch.tanh):
+    def __init__(
+        self,
+        n_dim: int = 1,
+        hidden_dim: int = 32,
+        activation: torch.nn.Module = torch.tanh,
+        device: str = "cpu",
+    ):
         """
         2-layer MLP that maps (B, n_dim) -> (B, 1)
 
@@ -13,6 +19,7 @@ class MLP(nn.Module):
             activation: Activation function to use (default: ReLU)
         """
         super().__init__()
+        self.device = torch.device(device)
         self.n_dim = n_dim
         self.activation = activation
         self.fc1 = nn.Linear(self.n_dim, hidden_dim, device=device)
@@ -22,7 +29,8 @@ class MLP(nn.Module):
     def make_grid(self, x: List[torch.Tensor]):
         # Form the meshgrid of points
         x_mesh = torch.meshgrid(
-            *[x_elem.to(dtype=torch.float64, device=self.device) for x_elem in x],
+            # *[x_elem.to(dtype=torch.float64, device=self.device) for x_elem in x],
+            *x,
             indexing="ij",
         )
         x_mesh = torch.stack(x_mesh, dim=-1)

@@ -1,290 +1,181 @@
+import argparse
 import os
-import matplotlib.pyplot as plt
-from time import time
-
-import numpy as np
-
 import torch
-import torch.nn as nn
-from tqdm import tqdm
-from typing import Callable
+from typing import List
 
-from src.experiments.interpolation.simple_fcns.base_analytical_target import (
+from src.experiments.interpolation.base_analytical_target import (
     BaseAnalyticalTarget,
 )
 from src.models.interpolant_nd import SpectralInterpolationND
 from src.models.mlp import MLP
-from src.models.rational_1d import RationalInterpolation1D
-
-
-def make_grid(t_pts, x_pts):
-    num_t_pts = t_pts.shape[0]
-    num_x_pts = x_pts.shape[0]
-
-    x_grid = torch.zeros(num_t_pts, num_x_pts)
-    x_grid[:] = x_pts.view(1, -1)
-
-    t_grid = torch.zeros(num_t_pts, num_x_pts)
-    t_grid[:] = t_pts.view(-1, 1)
-
-    grid = torch.stack([t_grid, x_grid], dim=-1)
-    return grid.reshape(-1, 2)
+from src.utils.metrics import l2_error, max_error, l2_relative_error
+from src.loggers.logger import Logger
 
 
 class AdvectionTarget(BaseAnalyticalTarget):
-    def __init__(self):
-        T = 2.0
-        L = 2 * np.pi
-        c = 50
-
-        def advection_forward(inputs):
-            t = inputs[:, 0]
-            x = inputs[:, 1]
-            return torch.sin(torch.remainder(x - c * t, L))
-
+    def __init__(self, c: float = 80, device: str = "cpu"):
         super().__init__(
-            "adv",
-            f=advection_forward,
-            domain=[(0.0, T), (0.0, L)],
-            derivative=lambda x: 0.0,  # Dummy function.
-            second_derivative=lambda x: 0.0,  # Dummy function.
+            "advection",
+            f=lambda t, x: torch.sin(x - c * t),
+            domain=[(0, 1), (0, 2 * torch.pi)],
+            device=device,
         )
 
-    def plot_comparison(
+    def plot_solution(
         self,
-        train_grid,
-        f_train_pred,
-        f_train_true,
-        eval_grid,
-        f_eval_pred,
-        f_eval_true,
-        save_path,
+        nodes: List[torch.Tensor],
+        u: torch.Tensor,
+        save_path: str = None,
     ):
-        # We assume that eval_grid is always uniformly, equally spaced. So we
-        # plot the heatmaps on eval_grid, since train_grid may correspond to for
-        # eg chebyshev grid.
-        
-        f_eval_pred = f_eval_pred.detach().cpu().numpy()
-        f_eval_true = f_eval_true.detach().cpu().numpy()
-
-        # Create a figure with 1x2 subplots
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 4))
-
-        ax1.imshow(f_eval_pred.T, cmap="viridis")
-        ax1.set_title("Predicted")
-
-        ax2.imshow(f_eval_true.T, cmap="viridis")
-        ax2.set_title("True")
-
-        # Adjust layout to prevent overlap
-        plt.tight_layout()
-
-        if save_path:
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            plt.savefig(save_path)
-            plt.close()
-
-    def train_model(
-        self,
-        model: nn.Module,
-        n_epochs: int,
-        optimizer: torch.optim.Optimizer,
-        t_basis_type: str,  # "chebyshev" or "fourier"
-        x_basis_type: str,  # "chebyshev" or "fourier"
-        t_sample_type: str,  # standard or uniform
-        x_sample_type: str,  # standard or uniform
-        t_n_samples: int,
-        x_n_samples: int,
-        eval_t_pts: torch.Tensor,
-        eval_x_pts: torch.Tensor,
-        plot_every: int = 100,
-        save_dir: str = None,
-    ):
-        # Training history
-        history = {
-            "loss": [],
-            "eval_l2_error": [],
-            "eval_max_error": [],
-        }
-        loss_fn = nn.MSELoss()
-
-        eval_grid = make_grid(eval_t_pts, eval_x_pts)
-
-        print("Training model...")
-        start_time = time()
-        for epoch in tqdm(range(n_epochs)):
-            # Sample points
-            sampled_pts_per_dim = self.sample_domain(
-                n_samples=[t_n_samples, x_n_samples],
-                # dim=0,
-                basis=[t_basis_type, x_basis_type],
-                type=[t_sample_type, x_sample_type],
-            )
-
-            # # We sort here so that 
-            # for i, sampled_pts in enumerate(sampled_pts_per_dim):
-            #     sampled_pts_per_dim[i] = torch.sort(sampled_pts)[0]
-
-            train_grid = make_grid(sampled_pts_per_dim[0], sampled_pts_per_dim[1])
-
-            # f_train_pred = model([train_grid])
-            f_train_pred = model(sampled_pts_per_dim)
-            f_train_true = self.get_function(train_grid).reshape(
-                t_n_samples, x_n_samples
-            )
-
-            # Train step
-            optimizer.zero_grad()
-            loss = loss_fn(f_train_pred, f_train_true)
-            loss.backward()
-            optimizer.step()
-
-            # Evaluate solution
-            f_eval_pred = model([eval_t_pts, eval_x_pts]).detach()
-            f_eval_true = self.get_function(eval_grid).reshape(
-                eval_t_pts.shape[0], eval_x_pts.shape[0]
-            )
-
-            eval_l2_error = torch.mean((f_eval_pred - f_eval_true) ** 2)
-            eval_max_error = torch.max(torch.abs(f_eval_pred - f_eval_true))
-
-            # Update history
-            history["loss"].append(loss.item())
-            history["eval_l2_error"].append(eval_l2_error.item())
-            history["eval_max_error"].append(eval_max_error.item())
-
-            # Print and plot progress
-            if (epoch + 1) % plot_every == 0:
-                current_time = time() - start_time
-                print(f"Epoch {epoch + 1} completed in {current_time:.2f} seconds")
-                print(f"Evaluation L2 error: {history['eval_l2_error'][-1]:1.3e}")
-                self.plot_comparison(
-                    train_grid,
-                    f_train_pred,
-                    f_train_true,
-                    eval_grid,
-                    f_eval_pred,
-                    f_eval_true,
-                    save_path=os.path.join(save_dir, f"adv_{epoch}.png"),
-                )
-
-        # Plot loss history
-        plt.figure()
-        plt.semilogy(history["loss"], label="Loss")
-        plt.semilogy(history["eval_l2_error"], label="Eval L2 Error")
-        plt.semilogy(history["eval_max_error"], label="Eval Max Error")
-        plt.legend()
-        plt.savefig(os.path.join(save_dir, "loss_history.png"))
-        plt.close()
+        self._plot_solution_default(nodes, u, save_path)
 
 
-# Compare interpolation of abs(x) using different methods:
+# Compare interpolation of advection using different methods:
 # 1. Neural network
 # 2. Polynomial interpolation
-# 3. Barycentric rational interpolation
 
 if __name__ == "__main__":
+
+    args = argparse.ArgumentParser()
+    args.add_argument("--c", type=int, default=80)
+    args.add_argument("--n_t", type=int, default=41)
+    args.add_argument("--n_x", type=int, default=41)
+    args.add_argument("--sample_type", type=str, default="uniform")
+    args.add_argument("--n_epochs", type=int, default=10000)
+    args.add_argument("--eval_every", type=int, default=100)
+    args = args.parse_args()
+
+    torch.random.manual_seed(0)
     torch.set_default_dtype(torch.float64)
+    device = "cuda"
 
     # Problem setup
-    target = AdvectionTarget()
-    t_n_samples = 200
-    x_n_samples = 50
+    c = args.c
+    target = AdvectionTarget(c=c, device=device)
+    base_save_dir = (
+        f"/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/advection/c={c}"
+    )
 
-    t_n_samples_eval = 100
-    x_n_samples_eval = 100
+    # Evaluation setup (shared for all methods)
+    eval_every = args.eval_every
+    n_eval = 200
+    t_eval = torch.linspace(
+        target.domain[0][0],
+        target.domain[0][1],
+        n_eval,
+        device=device,
+        requires_grad=True,
+    )
+    x_eval = torch.linspace(
+        target.domain[1][0],
+        target.domain[1][1],
+        n_eval + 1,
+        device=device,
+        requires_grad=True,
+    )[:-1]
 
-    t_eval = torch.linspace(target.domain[0][0], target.domain[0][1], t_n_samples_eval)
-    x_eval = torch.linspace(target.domain[1][0], target.domain[1][1], x_n_samples_eval)
+    def eval_sampler():
+        return t_eval, x_eval
 
-    base_save_dir = "/common/results/interpolation/advection"
+    eval_metrics = [l2_error, max_error, l2_relative_error]
 
-    # # 1. Neural network
-    # save_dir = os.path.join(base_save_dir, "mlp")
-    # model_mlp = MLP(n_dim=2, hidden_dim=32, activation=torch.tanh)
-    # lr = 1e-3
-    # optimizer = torch.optim.Adam(model_mlp.parameters(), lr=lr)
-    # n_epochs = 10000
-    # plot_every = 100
-    # basis_type_t = "fourier"
-    # basis_type_x = "fourier"
-    # sample_type_t = "standard"
-    # sample_type_x = "standard"
-    # target.train_model(
-    #     model=model_mlp,
-    #     n_epochs=n_epochs,
-    #     optimizer=optimizer,
-    #     t_basis_type=basis_type_t,
-    #     x_basis_type=basis_type_x,
-    #     t_sample_type=sample_type_t,
-    #     x_sample_type=sample_type_x,
-    #     t_n_samples=t_n_samples,
-    #     x_n_samples=x_n_samples,
-    #     eval_t_pts=t_eval,
-    #     eval_x_pts=x_eval,
-    #     plot_every=plot_every,
-    #     save_dir=save_dir,
-    # )
+    #########################################################
+    # 1. Neural network
+    #########################################################
+    save_dir = os.path.join(base_save_dir, "mlp")
+    # Logger setup
+    logger = Logger(path=os.path.join(save_dir, "logger.json"))
 
+    # Model setup
+    model_mlp = MLP(n_dim=2, hidden_dim=32, activation=torch.tanh, device=device)
+
+    # Training setup
+    n_epochs = args.n_epochs
+    lr = 1e-3
+    optimizer = torch.optim.Adam(model_mlp.parameters(), lr=lr)
+
+    n_t_train = 2 * c + 1
+    n_x_train = 2 * c
+
+    def train_sampler():
+        t_nodes = target.sample_domain_1d(
+            n_samples=n_t_train,
+            dim=0,
+            basis="fourier",
+            type=args.sample_type,
+        )
+        x_nodes = target.sample_domain_1d(
+            n_samples=n_x_train,
+            dim=1,
+            basis="fourier",
+            type=args.sample_type,
+        )
+        return [t_nodes, x_nodes]
+
+    print(f"Training MLP...")
+    target.train_model(
+        model=model_mlp,
+        n_epochs=n_epochs,
+        optimizer=optimizer,
+        train_sampler=train_sampler,
+        eval_sampler=eval_sampler,
+        eval_metrics=eval_metrics,
+        eval_every=eval_every,
+        save_dir=save_dir,
+        logger=logger,
+    )
+
+    #########################################################
     # 2. Polynomial interpolation
+    #########################################################
     save_dir = os.path.join(base_save_dir, "chebyshev")
-    n_t = 41
-    n_x = 41
-    bases = ["fourier", "chebyshev"]
+    # Logger setup
+    logger = Logger(path=os.path.join(save_dir, "logger.json"))
+
+    # Model setup
+    n_t = args.n_t if args.n_t is not None else c + 1
+    n_x = args.n_x if args.n_x is not None else c
+    bases = ["chebyshev", "fourier"]
     domains = target.domain
-    model_cheb_uniform = SpectralInterpolationND(
+    model = SpectralInterpolationND(
         Ns=[n_t, n_x],
         bases=bases,
         domains=domains,
-    )
-    lr = 1e-3
-    optimizer = torch.optim.Adam(model_cheb_uniform.parameters(), lr=lr)
-    n_epochs = 10000
-    plot_every = 100
-    basis_type_t = "fourier"
-    basis_type_x = "chebyshev"
-    sample_type_t = "standard"
-    sample_type_x = "standard"
-    target.train_model(
-        model=model_cheb_uniform,
-        n_epochs=n_epochs,
-        optimizer=optimizer,
-        t_basis_type=basis_type_t,
-        x_basis_type=basis_type_x,
-        t_sample_type=sample_type_t,
-        x_sample_type=sample_type_x,
-        t_n_samples=t_n_samples,
-        x_n_samples=x_n_samples,
-        eval_t_pts=t_eval,
-        eval_x_pts=x_eval,
-        plot_every=plot_every,
-        save_dir=save_dir,
+        device=device,
     )
 
-    # TODO: Looks like rational interpolation model still is only 1D?
-    # 3. Barycentric rational interpolation
-    # save_dir = os.path.join(base_save_dir, "rational")
-    # n_t = 21
-    # n_x = 21
-    # model_rational = RationalInterpolation1D(N=n_x, domain=target.domain[0])
-    # lr = 1e-3
-    # optimizer = torch.optim.Adam(model_rational.parameters(), lr=lr)
-    # n_epochs = 20000
-    # plot_every = 100
-    # basis_type = "chebyshev"
-    # sample_type = "standard"
-    # target.train_model(
-    #     model=model_rational,
-    #     n_epochs=n_epochs,
-    #     optimizer=optimizer,
-    #     t_basis_type=basis_type_t,
-    #     x_basis_type=basis_type_x,
-    #     t_sample_type=sample_type_t,
-    #     x_sample_type=sample_type_x,
-    #     t_n_samples=t_n_samples,
-    #     x_n_samples=x_n_samples,
-    #     eval_t_pts=t_eval,
-    #     eval_x_pts=x_eval,
-    #     plot_every=plot_every,
-    #     save_dir=save_dir,
-    # )
+    # Training setup
+    n_epochs = args.n_epochs
+    lr = 1e-3
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    n_t_train = 2 * c + 1
+    n_x_train = 2 * c
+
+    def train_sampler():
+        t_nodes = target.sample_domain_1d(
+            n_samples=n_t_train,
+            dim=0,
+            basis=bases[0],
+            type=args.sample_type,
+        )
+        x_nodes = target.sample_domain_1d(
+            n_samples=n_x_train,
+            dim=1,
+            basis=bases[1],
+            type=args.sample_type,
+        )
+        return [t_nodes, x_nodes]
+
+    print(f"Training Polynomial Interpolant...")
+    target.train_model(
+        model=model,
+        n_epochs=n_epochs,
+        optimizer=optimizer,
+        train_sampler=train_sampler,
+        eval_sampler=eval_sampler,
+        eval_metrics=eval_metrics,
+        eval_every=eval_every,
+        save_dir=save_dir,
+        logger=logger,
+    )
