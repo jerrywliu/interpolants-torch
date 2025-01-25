@@ -43,10 +43,10 @@ class Logger:
     def get(self, key):
         return self.data[key]
 
-    def get_iter(self, key):
+    def get_iters(self, key):
         return self.data[key]["iter"]
 
-    def get_value(self, key):
+    def get_values(self, key):
         return self.data[key]["value"]
 
     def get_most_recent_value(self, key):

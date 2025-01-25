@@ -110,16 +110,17 @@ class BaseFcn:
         if self.n_dims == 1:
 
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+            nodes_cpu = nodes[0].cpu()
 
             # Plot 1: predicted solution
-            ax1.plot(nodes[0], u_cpu, "b-", label="Predicted")
-            ax1.plot(nodes[0], u_true, "k:", label="True")
+            ax1.plot(nodes_cpu, u_cpu, "b-", label="Predicted")
+            ax1.plot(nodes_cpu, u_true, "k:", label="True")
             ax1.set_title("Predicted vs True")
             ax1.legend()
             ax1.grid(True)
 
             # Plot 2: error (log scale)
-            ax2.semilogy(nodes[0], errors, "b-", label="Absolute Error")
+            ax2.semilogy(nodes_cpu, errors, "b-", label="Absolute Error")
             ax2.set_title("Absolute Error")
             ax2.legend()
             ax2.grid(True)

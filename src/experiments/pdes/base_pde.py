@@ -112,7 +112,7 @@ class BasePDE(BaseFcn):
                     f"Evaluation L2 error: {logger.get_most_recent_value('eval_l2_error'):1.3e}"
                 )
                 self.plot_solution(
-                    [eval_nodes[i] for i in range(len(eval_nodes))],
+                    eval_nodes,
                     u_eval,
                     save_path=os.path.join(
                         save_dir, f"{self.name}_solution_{epoch}.png"
