@@ -42,8 +42,8 @@ class SpectralInterpolationND(nn.Module):
 
         for dim in range(self.n_dim):
             if self.bases[dim] == "chebyshev":
-                i = torch.linspace(0, 1, self.Ns[dim])
-                self.nodes_standard[dim] = torch.cos(torch.pi * i).to(self.device)
+                i = torch.linspace(0, 1, self.Ns[dim], device=self.device)
+                self.nodes_standard[dim] = torch.cos(torch.pi * i)
                 # Compute barycentric weights for Chebyshev
                 N = self.Ns[dim]
                 weights = torch.ones(N, device=self.device)
@@ -54,8 +54,8 @@ class SpectralInterpolationND(nn.Module):
                 self.k[dim] = None
             else:
                 self.nodes_standard[dim] = torch.linspace(
-                    0, 2 * torch.pi, self.Ns[dim] + 1
-                )[:-1].to(self.device)
+                    0, 2 * torch.pi, self.Ns[dim] + 1, device=self.device
+                )[:-1]
                 # Compute FFT frequencies
                 self.k[dim] = torch.fft.fftfreq(self.Ns[dim]) * self.Ns[dim]
                 self.k[dim] = self.k[dim].to(self.device)
@@ -86,9 +86,7 @@ class SpectralInterpolationND(nn.Module):
                 ] + self.domain_lengths[d] * x / (2 * torch.pi)
 
             # Map standard nodes to physical domain
-            self.nodes[dim] = self._from_standard[dim](self.nodes_standard[dim]).to(
-                self.device
-            )
+            self.nodes[dim] = self._from_standard[dim](self.nodes_standard[dim])
 
         # Set up diff matrices cache
         self._diff_matrices = [{} for _ in range(self.n_dim)]
