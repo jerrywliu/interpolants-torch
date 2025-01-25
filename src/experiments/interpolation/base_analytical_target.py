@@ -47,7 +47,7 @@ class BaseAnalyticalTarget(BaseFcn):
     def get_loss(self, model: nn.Module, nodes: List[torch.Tensor]) -> torch.Tensor:
         u_pred = model(nodes)
         u_true = self.get_function(nodes)
-        return torch.norm(u_pred - u_true, p=2)
+        return torch.mean((u_pred - u_true) ** 2)
 
     def plot_solution(
         self, nodes: List[torch.Tensor], u: torch.Tensor, save_path: str = None
@@ -93,15 +93,18 @@ class BaseAnalyticalTarget(BaseFcn):
 
             # Eval, print, and plot progress
             if (epoch + 1) % eval_every == 0:
-                eval_nodes = eval_sampler()
-                u_eval = model(eval_nodes)
-                u_true = self.get_function(eval_nodes)
-                for eval_metric in eval_metrics:
-                    eval_metric_value = eval_metric(u_eval, u_true)
-                    logger.log(f"eval_{eval_metric.__name__}", eval_metric_value, epoch)
+                with torch.no_grad():
+                    eval_nodes = eval_sampler()
+                    u_eval = model(eval_nodes)
+                    u_true = self.get_function(eval_nodes)
+                    for eval_metric in eval_metrics:
+                        eval_metric_value = eval_metric(u_eval, u_true)
+                        logger.log(
+                            f"eval_{eval_metric.__name__}", eval_metric_value, epoch
+                        )
 
-                eval_loss = self.get_loss(model, eval_nodes)
-                logger.log("eval_loss", eval_loss.item(), epoch)
+                    eval_loss = self.get_loss(model, eval_nodes)
+                    logger.log("eval_loss", eval_loss.item(), epoch)
 
                 current_time = time() - start_time
                 print(f"Epoch {epoch + 1} completed in {current_time:.2f} seconds")

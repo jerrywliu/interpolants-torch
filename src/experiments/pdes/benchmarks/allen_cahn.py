@@ -234,7 +234,7 @@ if __name__ == "__main__":
             model.parameters(),
             lr=1.0,
             rank=100,  # rank of Nyström approximation
-            mu=1e-4,  # damping parameter
+            mu=1e-2,  # damping parameter
             line_search_fn="armijo",
         )
         pde.train_model_nys_newton(
