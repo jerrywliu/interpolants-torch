@@ -32,7 +32,9 @@ class Advection(BasePDE):
         device: str = "cpu",
         **base_kwargs,
     ):
-        super().__init__("advection", [(0, 1), (0, 2 * torch.pi)], device=device)
+        super().__init__(
+            "advection", [(0, 1), (0, 2 * torch.pi)], device=device, **base_kwargs
+        )
         self.c = c
         self.t_final = t_final
         if u_0 is None:
