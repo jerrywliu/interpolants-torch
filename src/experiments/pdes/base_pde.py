@@ -6,11 +6,15 @@ from tqdm import tqdm
 from typing import List, Tuple, Callable
 
 from src.experiments.base_fcn import BaseFcn
+from src.loggers.logger import Logger
 
 
 class BasePDE(BaseFcn):
     def __init__(
-        self, name: str, domain: List[Tuple[float, float]], device: str = "cpu"
+        self,
+        name: str,
+        domain: List[Tuple[float, float]],
+        device: str = "cpu",
     ):
         super().__init__(name, domain, device)
 
@@ -44,18 +48,12 @@ class BasePDE(BaseFcn):
         ic_weight: float,
         eval_sampler: Callable,
         eval_metrics: List[Callable],
-        plot_every: int = 100,
+        eval_every: int = 1000,
         save_dir: str = None,
+        logger: Logger = None,
     ):
-        # Training history
-        history = {
-            "loss": [],
-            "train_pde_loss": [],
-            "train_ic_loss": [],
-            "eval_pde_loss": [],
-        }
-        for eval_metric in eval_metrics:
-            history[f"eval_{eval_metric.__name__}"] = []
+        if logger is None:
+            logger = Logger(path=os.path.join(save_dir, "logger.json"))
 
         print("Training model...")
         start_time = time()
@@ -64,42 +62,55 @@ class BasePDE(BaseFcn):
             # Sample points
             pde_nodes = pde_sampler()
             ic_nodes = ic_sampler()
+
             # Train step
             optimizer.zero_grad()
+
             # Get PDE loss
             loss, pde_loss, ic_loss = self.get_pde_loss(
                 model, pde_nodes, ic_nodes, ic_weight
             )
+
             # Backprop
             loss.backward()
+
             # Update parameters
             optimizer.step()
 
-            # Evaluate solution
-            eval_nodes = eval_sampler()
-            u_eval = model.interpolate(eval_nodes)
-            u_true = self.get_solution(eval_nodes)
-            for eval_metric in eval_metrics:
-                eval_metric_value = eval_metric(u_eval, u_true)
-                history[f"eval_{eval_metric.__name__}"].append(eval_metric_value)
-            # Evaluate PDE loss
-            _, eval_pde_loss, _ = self.get_pde_loss(
-                model, eval_nodes, ic_nodes, ic_weight
-            )
+            # Log
+            logger.log("loss", loss.item(), epoch)
+            logger.log("train_pde_loss", pde_loss.item(), epoch)
+            logger.log("train_ic_loss", ic_loss.item(), epoch)
 
-            # Update history
-            history["loss"].append(loss.item())
-            history["train_pde_loss"].append(pde_loss.item())
-            history["train_ic_loss"].append(ic_loss.item())
-            history["eval_pde_loss"].append(eval_pde_loss.item())
+            # Eval, print, and plot progress
+            if (epoch + 1) % eval_every == 0:
 
-            # Print and plot progress
-            if (epoch + 1) % plot_every == 0:
+                # Evaluate solution
+                with torch.no_grad():
+                    eval_nodes = eval_sampler()
+                    u_eval = model(eval_nodes)
+                    u_true = self.get_solution(eval_nodes)
+                    for eval_metric in eval_metrics:
+                        eval_metric_value = eval_metric(u_eval, u_true)
+                        logger.log(
+                            f"eval_{eval_metric.__name__}", eval_metric_value, epoch
+                        )
+
+                    # Evaluate PDE loss
+                    _, eval_pde_loss, _ = self.get_pde_loss(
+                        model, eval_nodes, ic_nodes, ic_weight
+                    )
+                    logger.log("eval_pde_loss", eval_pde_loss.item(), epoch)
+
                 current_time = time() - start_time
                 print(f"Epoch {epoch + 1} completed in {current_time:.2f} seconds")
-                print(f"PDE loss: {history['train_pde_loss'][-1]:1.3e}")
-                print(f"IC loss: {history['train_ic_loss'][-1]:1.3e}")
-                print(f"Evaluation L2 error: {history['eval_l2_error'][-1]:1.3e}")
+                print(
+                    f"PDE loss: {logger.get_most_recent_value('train_pde_loss'):1.3e}"
+                )
+                print(f"IC loss: {logger.get_most_recent_value('train_ic_loss'):1.3e}")
+                print(
+                    f"Evaluation L2 error: {logger.get_most_recent_value('eval_l2_error'):1.3e}"
+                )
                 self.plot_solution(
                     [eval_nodes[i] for i in range(len(eval_nodes))],
                     u_eval,
@@ -109,32 +120,24 @@ class BasePDE(BaseFcn):
                 )
 
                 # Save history
-                torch.save(history, os.path.join(save_dir, "history.pth"))
-
-        return history
+                logger.save()
 
     def train_model_lbfgs(
         self,
         model: nn.Module,
-        max_iter: int,
+        n_epochs: int,
         optimizer: torch.optim.LBFGS,
         pde_sampler: Callable,
         ic_sampler: Callable,
         ic_weight: float,
         eval_sampler: Callable,
         eval_metrics: List[Callable],
-        plot_every: int = 10,
+        eval_every: int = 100,
         save_dir: str = None,
+        logger: Logger = None,
     ):
-        # Training history
-        history = {
-            "loss": [],
-            "train_pde_loss": [],
-            "train_ic_loss": [],
-            "eval_pde_loss": [],
-        }
-        for eval_metric in eval_metrics:
-            history[f"eval_{eval_metric.__name__}"] = []
+        if logger is None:
+            logger = Logger(path=os.path.join(save_dir, "logger.json"))
 
         # Sample points once since L-BFGS works better with fixed points
         pde_nodes = pde_sampler()
@@ -154,71 +157,74 @@ class BasePDE(BaseFcn):
             return loss
 
         # Training loop
-        for i in tqdm(range(max_iter)):
+        for epoch in tqdm(range(n_epochs)):
+
             # Optimize
             loss = optimizer.step(closure)
 
-            # Evaluate solution
-            with torch.no_grad():
-                u_eval = model.interpolate(eval_nodes)
-                u_true = self.get_solution(eval_nodes)
-                for eval_metric in eval_metrics:
-                    eval_metric_value = eval_metric(u_eval, u_true)
-                    history[f"eval_{eval_metric.__name__}"].append(eval_metric_value)
-                # Get losses for history
-                total_loss, pde_loss, ic_loss = self.get_pde_loss(
-                    model, pde_nodes, ic_nodes, ic_weight
-                )
-                _, eval_pde_loss, _ = self.get_pde_loss(
-                    model, eval_nodes, ic_nodes, ic_weight
-                )
+            # Log
+            logger.log("loss", loss.item(), epoch)
 
-            # Update history
-            history["loss"].append(total_loss.item())
-            history["train_pde_loss"].append(pde_loss.item())
-            history["train_ic_loss"].append(ic_loss.item())
-            history["eval_pde_loss"].append(eval_pde_loss.item())
+            # Eval, print, and plot progress
+            if (epoch + 1) % eval_every == 0:
 
-            # Print and plot progress
-            if (i + 1) % plot_every == 0:
+                # Evaluate solution
+                with torch.no_grad():
+                    u_eval = model.interpolate(eval_nodes)
+                    u_true = self.get_solution(eval_nodes)
+                    for eval_metric in eval_metrics:
+                        eval_metric_value = eval_metric(u_eval, u_true)
+                        logger.log(
+                            f"eval_{eval_metric.__name__}", eval_metric_value, epoch
+                        )
+
+                    # Evaluate PDE losses
+                    total_loss, pde_loss, ic_loss = self.get_pde_loss(
+                        model, pde_nodes, ic_nodes, ic_weight
+                    )
+                    _, eval_pde_loss, _ = self.get_pde_loss(
+                        model, eval_nodes, ic_nodes, ic_weight
+                    )
+                    logger.log("train_pde_loss", pde_loss.item(), epoch)
+                    logger.log("train_ic_loss", ic_loss.item(), epoch)
+                    logger.log("eval_pde_loss", eval_pde_loss.item(), epoch)
+
                 current_time = time() - start_time
-                print(f"Iteration {i + 1} completed in {current_time:.2f} seconds")
-                print(f"PDE loss: {history['train_pde_loss'][-1]:1.3e}")
-                print(f"IC loss: {history['train_ic_loss'][-1]:1.3e}")
-                print(f"Evaluation L2 error: {history['eval_l2_error'][-1]:1.3e}")
+                print(f"Iteration {epoch + 1} completed in {current_time:.2f} seconds")
+                print(
+                    f"PDE loss: {logger.get_most_recent_value('train_pde_loss'):1.3e}"
+                )
+                print(f"IC loss: {logger.get_most_recent_value('train_ic_loss'):1.3e}")
+                print(
+                    f"Evaluation L2 error: {logger.get_most_recent_value('eval_l2_error'):1.3e}"
+                )
                 self.plot_solution(
                     eval_nodes,
                     u_eval,
-                    save_path=os.path.join(save_dir, f"{self.name}_solution_{i}.png"),
+                    save_path=os.path.join(
+                        save_dir, f"{self.name}_solution_{epoch}.png"
+                    ),
                 )
 
                 # Save history
-                torch.save(history, os.path.join(save_dir, "history.pth"))
-
-        return history
+                logger.save()
 
     def train_model_nys_newton(
         self,
         model: nn.Module,
-        max_iter: int,
+        n_epochs: int,
         optimizer: torch.optim.Optimizer,  # NysNewtonCG optimizer
         pde_sampler: Callable,
         ic_sampler: Callable,
         ic_weight: float,
         eval_sampler: Callable,
         eval_metrics: List[Callable],
-        plot_every: int = 10,
+        eval_every: int = 100,
         save_dir: str = None,
+        logger: Logger = None,
     ):
-        # Training history
-        history = {
-            "loss": [],
-            "train_pde_loss": [],
-            "train_ic_loss": [],
-            "eval_pde_loss": [],
-        }
-        for eval_metric in eval_metrics:
-            history[f"eval_{eval_metric.__name__}"] = []
+        if logger is None:
+            logger = Logger(path=os.path.join(save_dir, "logger.json"))
 
         # Sample points once since Newton methods work better with fixed points
         pde_nodes = pde_sampler()
@@ -246,47 +252,54 @@ class BasePDE(BaseFcn):
             return loss, grads
 
         # Training loop
-        for i in tqdm(range(max_iter)):
+        for epoch in tqdm(range(n_epochs)):
+
             # Optimize
             loss, _ = optimizer.step(closure)
 
-            # Evaluate solution
-            with torch.no_grad():
-                u_eval = model.interpolate(eval_nodes)
-                u_true = self.get_solution(eval_nodes)
-                for eval_metric in eval_metrics:
-                    eval_metric_value = eval_metric(u_eval, u_true)
-                    history[f"eval_{eval_metric.__name__}"].append(eval_metric_value)
-                # Get losses for history
-                total_loss, pde_loss, ic_loss = self.get_pde_loss(
-                    model, pde_nodes, ic_nodes, ic_weight
-                )
-                _, eval_pde_loss, _ = self.get_pde_loss(
-                    model, eval_nodes, ic_nodes, ic_weight
-                )
+            # Log
+            logger.log("loss", loss.item(), epoch)
 
-            # Update history
-            history["loss"].append(total_loss.item())
-            history["train_pde_loss"].append(pde_loss.item())
-            history["train_ic_loss"].append(ic_loss.item())
-            history["eval_pde_loss"].append(eval_pde_loss.item())
+            # Eval, print, and plot progress
+            if (epoch + 1) % eval_every == 0:
 
-            # Print and plot progress
-            if (i + 1) % plot_every == 0:
+                # Evaluate solution
+                with torch.no_grad():
+                    u_eval = model.interpolate(eval_nodes)
+                    u_true = self.get_solution(eval_nodes)
+                    for eval_metric in eval_metrics:
+                        eval_metric_value = eval_metric(u_eval, u_true)
+                        logger.log(
+                            f"eval_{eval_metric.__name__}", eval_metric_value, epoch
+                        )
+
+                    # Get losses for history
+                    total_loss, pde_loss, ic_loss = self.get_pde_loss(
+                        model, pde_nodes, ic_nodes, ic_weight
+                    )
+                    _, eval_pde_loss, _ = self.get_pde_loss(
+                        model, eval_nodes, ic_nodes, ic_weight
+                    )
+                    logger.log("train_pde_loss", pde_loss.item(), epoch)
+                    logger.log("train_ic_loss", ic_loss.item(), epoch)
+                    logger.log("eval_pde_loss", eval_pde_loss.item(), epoch)
+
                 current_time = time() - start_time
-                print(f"Iteration {i + 1} completed in {current_time:.2f} seconds")
-                print(f"PDE loss: {history['train_pde_loss'][-1]:1.3e}")
-                print(f"IC loss: {history['train_ic_loss'][-1]:1.3e}")
+                print(f"Iteration {epoch + 1} completed in {current_time:.2f} seconds")
                 print(
-                    f"Evaluation L2 rel error: {history['eval_l2_relative_error'][-1]:1.3e}"
+                    f"PDE loss: {logger.get_most_recent_value('train_pde_loss'):1.3e}"
+                )
+                print(f"IC loss: {logger.get_most_recent_value('train_ic_loss'):1.3e}")
+                print(
+                    f"Evaluation L2 rel error: {logger.get_most_recent_value('eval_l2_relative_error'):1.3e}"
                 )
                 self.plot_solution(
                     eval_nodes,
                     u_eval,
-                    save_path=os.path.join(save_dir, f"{self.name}_solution_{i}.png"),
+                    save_path=os.path.join(
+                        save_dir, f"{self.name}_solution_{epoch}.png"
+                    ),
                 )
 
                 # Save history
-                torch.save(history, os.path.join(save_dir, "history.pth"))
-
-        return history
+                logger.save()

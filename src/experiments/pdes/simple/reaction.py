@@ -10,6 +10,7 @@ from typing import List, Callable, Tuple
 from src.experiments.pdes.base_pde import BasePDE
 from src.models.interpolant_nd import SpectralInterpolationND
 from src.utils.metrics import l2_error, max_error, l2_relative_error
+from src.loggers.logger import Logger
 
 from src.optimizers.shampoo import Shampoo
 from src.optimizers.nys_newton_cg import NysNewtonCG
@@ -29,10 +30,13 @@ u(t, x) = u_0(x) exp(rho * t) / [u_0(x) exp(rho * t) + (1 - u_0(x))]
 
 class Reaction(BasePDE):
     def __init__(
-        self, rho: float, t_final: float = 1, u_0: Callable = None, device: str = "cpu"
+        self,
+        rho: float,
+        t_final: float = 1,
+        u_0: Callable = None,
+        device: str = "cpu",
     ):
-        super().__init__("reaction", [(0, 1), (0, 2 * torch.pi)])
-        self.device = torch.device(device)
+        super().__init__("reaction", [(0, 1), (0, 2 * torch.pi)], device=device)
         self.rho = rho
         self.t_final = t_final
         if u_0 is None:
@@ -152,63 +156,7 @@ class Reaction(BasePDE):
         u: torch.Tensor,  # (N_t, N_x)
         save_path: str = None,
     ):
-        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 4))
-        u_cpu = u.detach().cpu()
-
-        # Predicted solution
-        im1 = ax1.imshow(
-            u_cpu.T,
-            extent=[
-                self.domain[0][0],
-                self.domain[0][1],
-                self.domain[1][0],
-                self.domain[1][1],
-            ],
-            origin="lower",
-            aspect="auto",
-        )
-        plt.colorbar(im1, ax=ax1)
-        ax1.set_title("Predicted Solution")
-
-        # True solution
-        u_true = self.get_solution(nodes).cpu()
-        im2 = ax2.imshow(
-            u_true.T,
-            extent=[
-                self.domain[0][0],
-                self.domain[0][1],
-                self.domain[1][0],
-                self.domain[1][1],
-            ],
-            origin="lower",
-            aspect="auto",
-        )
-        plt.colorbar(im2, ax=ax2)
-        ax2.set_title("True Solution")
-
-        # Error on log scale
-        error = torch.abs(u_cpu - u_true)
-        im3 = ax3.imshow(
-            error.T,
-            extent=[
-                self.domain[0][0],
-                self.domain[0][1],
-                self.domain[1][0],
-                self.domain[1][1],
-            ],
-            origin="lower",
-            aspect="auto",
-            norm="log",
-        )
-        plt.colorbar(im3, ax=ax3)
-        ax3.set_title("Error")
-
-        plt.tight_layout()
-
-        if save_path is not None:
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            plt.savefig(save_path)
-            plt.close()
+        self._plot_solution_default(nodes, u, save_path)
 
 
 if __name__ == "__main__":
@@ -232,10 +180,11 @@ if __name__ == "__main__":
     pde = Reaction(rho=rho, t_final=t_final, u_0=u_0, device=device)
     save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/reaction/rho={rho}_method={args.method}_n_t={args.n_t}_n_x={args.n_x}"
 
+    logger = Logger(path=os.path.join(save_dir, "logger.json"))
+
     # Evaluation setup
     n_eval = 200
     t_eval = torch.linspace(pde.domain[0][0], pde.domain[0][1], n_eval).to(device)
-    # x_eval = torch.linspace(pde.domain[1][0], pde.domain[1][1], n_eval + 1)[:-1]
     x_eval = torch.linspace(pde.domain[1][0], pde.domain[1][1], n_eval).to(device)
 
     # Model setup
@@ -252,7 +201,7 @@ if __name__ == "__main__":
 
     # Training setup
     n_epochs = args.n_epochs
-    plot_every = 1000
+    eval_every = 1000
     lr = 1e-3
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     # PDE
@@ -263,8 +212,6 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"Invalid sample type: {args.sample_type}")
     n_t_train = 161
-    # n_x_train = 160
-    # n_ic_train = 160
     n_x_train = 161
     n_ic_train = 161
     ic_weight = 10
@@ -309,29 +256,15 @@ if __name__ == "__main__":
             ic_weight=ic_weight,
             eval_sampler=eval_sampler,
             eval_metrics=eval_metrics,
-            plot_every=plot_every,
+            eval_every=eval_every,
             save_dir=save_dir,
+            logger=logger,
         )
     elif args.method == "lbfgs":
         # Train model with L-BFGS
         optimizer = torch.optim.LBFGS(model.parameters(), history_size=1000)
         pde.train_model_lbfgs(
             model,
-            max_iter=n_epochs,
-            optimizer=optimizer,
-            pde_sampler=pde_sampler,
-            ic_sampler=ic_sampler,
-            ic_weight=ic_weight,
-            eval_sampler=eval_sampler,
-            eval_metrics=eval_metrics,
-            plot_every=100,
-            save_dir=save_dir,
-        )
-    elif args.method == "shampoo":
-        # Train model with Shampoo
-        optimizer = Shampoo(model.parameters(), lr=lr, update_freq=1)
-        pde.train_model(
-            model,
             n_epochs=n_epochs,
             optimizer=optimizer,
             pde_sampler=pde_sampler,
@@ -339,23 +272,9 @@ if __name__ == "__main__":
             ic_weight=ic_weight,
             eval_sampler=eval_sampler,
             eval_metrics=eval_metrics,
-            plot_every=plot_every,
+            eval_every=10,
             save_dir=save_dir,
-        )
-    elif args.method == "sgd":
-        # Train model with SGD
-        optimizer = torch.optim.SGD(model.parameters(), lr=1e-4, momentum=0.9)
-        pde.train_model(
-            model,
-            n_epochs=n_epochs,
-            optimizer=optimizer,
-            pde_sampler=pde_sampler,
-            ic_sampler=ic_sampler,
-            ic_weight=ic_weight,
-            eval_sampler=eval_sampler,
-            eval_metrics=eval_metrics,
-            plot_every=plot_every,
-            save_dir=save_dir,
+            logger=logger,
         )
     elif args.method == "nys_newton":
         # Train model with Nys-Newton
@@ -363,18 +282,20 @@ if __name__ == "__main__":
             model.parameters(),
             lr=1.0,
             rank=100,  # rank of Nyström approximation
-            mu=1e-4,  # damping parameter
+            mu=1e-2,  # damping parameter
+            cg_max_iters=1000,
             line_search_fn="armijo",
         )
         pde.train_model_nys_newton(
             model,
-            max_iter=n_epochs,
+            n_epochs=n_epochs,
             optimizer=optimizer,
             pde_sampler=pde_sampler,
             ic_sampler=ic_sampler,
             ic_weight=ic_weight,
             eval_sampler=eval_sampler,
             eval_metrics=eval_metrics,
-            plot_every=10,
+            eval_every=10,
             save_dir=save_dir,
+            logger=logger,
         )
