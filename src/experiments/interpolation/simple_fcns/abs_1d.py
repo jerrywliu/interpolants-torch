@@ -15,13 +15,14 @@ from src.models.rational_1d import RationalInterpolation1D
 
 
 class Abs1DTarget(BaseAnalyticalTarget):
-    def __init__(self):
+    def __init__(self, device: str = "cpu"):
         super().__init__(
             "abs_1d",
             f=lambda x: torch.abs(x),
             domain=[(-1, 1)],
             derivative=lambda x: torch.sign(x),
             second_derivative=lambda x: torch.zeros_like(x),
+            device=device,
         )
 
     def plot_comparison(
