@@ -1,3 +1,5 @@
+import matplotlib.pyplot as plt
+import os
 import torch
 from typing import List, Tuple
 
@@ -47,6 +49,11 @@ class BaseFcn:
     def get_name(self) -> str:
         return self.name
 
+    # Input: nodes = [(n_1,), ..., (n_d,)]
+    # Output: u = (n_1 * ... * n_d,)
+    def get_solution(self, nodes: List[torch.Tensor]) -> torch.Tensor:
+        raise NotImplementedError
+
     # Sample points from one dimension of the domain:
     # basis: "chebyshev" distributed or "fourier" (uniformly) distributed
     # type: "standard" (canonical nodes) or "uniform" (uniformly sampled)
@@ -87,3 +94,94 @@ class BaseFcn:
             self.sample_domain_1d(n_samples, dim, basis[dim], type[dim])
             for dim in range(self.n_dims)
         ]
+
+    # Default plot solution function for 1D/2D functions
+    # Plots predicted, true, and error (log scale)
+    def _plot_solution_default(
+        self,
+        nodes: List[torch.Tensor],  # (N_x, 1)
+        u: torch.Tensor,  # (N_x,)
+        save_path: str = None,
+    ):
+        u_cpu = u.detach().cpu()
+        u_true = self.get_solution(nodes).cpu()
+        errors = torch.abs(u_cpu - u_true)
+
+        if self.n_dims == 1:
+
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+
+            # Plot 1: predicted solution
+            ax1.plot(nodes[0], u_cpu, "b-", label="Predicted")
+            ax1.plot(nodes[0], u_true, "k:", label="True")
+            ax1.set_title("Predicted vs True")
+            ax1.legend()
+            ax1.grid(True)
+
+            # Plot 2: error (log scale)
+            ax2.semilogy(nodes[0], errors, "b-", label="Absolute Error")
+            ax2.set_title("Absolute Error")
+            ax2.legend()
+            ax2.grid(True)
+
+        elif self.n_dims == 2:
+            # For 2D, we assume the solution is parameterized as (t, x) for temporal PDEs. So for plotting, we plot u.T.
+
+            fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 4))
+
+            # Plot 1: predicted solution
+            im1 = ax1.imshow(
+                u_cpu.T,
+                extent=[
+                    self.domain[0][0],
+                    self.domain[0][1],
+                    self.domain[1][0],
+                    self.domain[1][1],
+                ],
+                origin="lower",
+                aspect="auto",
+            )
+            plt.colorbar(im1, ax=ax1)
+            ax1.set_title("Predicted Solution")
+
+            # Plot 2: true solution
+            im2 = ax2.imshow(
+                u_true.T,
+                extent=[
+                    self.domain[0][0],
+                    self.domain[0][1],
+                    self.domain[1][0],
+                    self.domain[1][1],
+                ],
+                origin="lower",
+                aspect="auto",
+            )
+            plt.colorbar(im2, ax=ax2)
+            ax2.set_title("True Solution")
+
+            # Plot 3: error (log scale)
+            im3 = ax3.imshow(
+                errors.T,
+                extent=[
+                    self.domain[0][0],
+                    self.domain[0][1],
+                    self.domain[1][0],
+                    self.domain[1][1],
+                ],
+                origin="lower",
+                aspect="auto",
+                norm="log",
+            )
+            plt.colorbar(im3, ax=ax3)
+            ax3.set_title("Absolute Error")
+
+        else:
+            raise ValueError(
+                f"Invalid number of dimensions for _plot_solution_default: {self.n_dims}"
+            )
+
+        plt.tight_layout()
+        if save_path:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            plt.savefig(save_path)
+            plt.close()
