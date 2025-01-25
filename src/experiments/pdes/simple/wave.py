@@ -2,13 +2,13 @@ import argparse
 import os
 import torch
 import torch.nn as nn
-from typing import List, Callable, Tuple
+from typing import List, Callable, Tuple, Dict
 
 from src.experiments.pdes.base_pde import BasePDE
 from src.models.interpolant_nd import SpectralInterpolationND
+from src.models.mlp import MLP
 from src.utils.metrics import l2_error, max_error, l2_relative_error
 from src.loggers.logger import Logger
-from src.optimizers.nys_newton_cg import NysNewtonCG
 
 """
 1D Wave equation:
@@ -30,8 +30,9 @@ class Wave(BasePDE):
         c: float = 2,
         beta: float = 5,
         device: str = "cpu",
+        **base_kwargs,
     ):
-        super().__init__("wave", [(0, 1), (0, 1)], device=device)
+        super().__init__("wave", [(0, 1), (0, 1)], device=device, **base_kwargs)
         self.c = c
         self.beta = beta
         self.u_0 = lambda x: torch.sin(torch.pi * x) + 0.5 * torch.sin(
@@ -46,14 +47,16 @@ class Wave(BasePDE):
         t_mesh, x_mesh = torch.meshgrid(nodes[0], nodes[1], indexing="ij")
         return self.exact_solution(t_mesh, x_mesh)
 
-    def get_pde_loss(
+    def get_loss_dict(
         self,
         model: nn.Module,
         pde_nodes: List[torch.Tensor],
         ic_nodes: List[torch.Tensor],  # [torch.tensor(0), nodes]
         ic_weight: float = 1,
         **kwargs,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Dict[str, torch.Tensor]:
+        if ic_nodes is None:
+            ic_nodes = [torch.tensor([0.0]), pde_nodes[-1]]
 
         n_t, n_x = pde_nodes[0].shape[0], pde_nodes[1].shape[0]
         n_ic = ic_nodes[1].shape[0]
@@ -68,38 +71,116 @@ class Wave(BasePDE):
             u_t_ic = model.derivative(ic_nodes, k=(1, 0))[0]
             # Enforce periodic boundary conditions at t nodes
             u_periodic_t0 = model.interpolate(
-                [pde_nodes[0], torch.tensor([model.domains[1][0]], device=model.device)]
+                [
+                    pde_nodes[0],
+                    torch.tensor(
+                        [self.domain[1][0]],
+                        dtype=pde_nodes[1].dtype,
+                        device=model.device,
+                        requires_grad=True,
+                    ),
+                ]
             )
             u_periodic_t1 = model.interpolate(
-                [pde_nodes[0], torch.tensor([model.domains[1][1]], device=model.device)]
+                [
+                    pde_nodes[0],
+                    torch.tensor(
+                        [self.domain[1][1]],
+                        dtype=pde_nodes[1].dtype,
+                        device=model.device,
+                        requires_grad=True,
+                    ),
+                ]
             )
         else:
             # PDE
-            u = model(pde_nodes).reshape(n_t, n_x)
-            grads = torch.autograd.grad(u.sum(), pde_nodes, create_graph=True)[
-                0
-            ]  # (N_t*N_x, 2)
-            u_tt = grads[:, 0].reshape(n_t, n_x)
-            u_xx = grads[:, 1].reshape(n_t, n_x)
+            grid = model.make_grid(pde_nodes)  # (N_t*N_x, 2)
+            u = model.forward_grid(grid).reshape(n_t, n_x)  # (N_t, N_x)
+            grads = torch.autograd.grad(
+                u.sum(), grid, create_graph=True
+            )  # (N_t*N_x, 2)
+            # First derivatives
+            u_t = grads[0][..., 0].reshape(n_t, n_x)
+            u_x = grads[0][..., 1].reshape(n_t, n_x)
+            # Second derivative: u_tt
+            grad_tt = torch.autograd.grad(u_t.sum(), grid, create_graph=True)
+            u_tt = grad_tt[0][..., 0].reshape(n_t, n_x)
+            # Second derivative: u_xx
+            grad_xx = torch.autograd.grad(u_x.sum(), grid, create_graph=True)
+            u_xx = grad_xx[0][..., 1].reshape(n_t, n_x)
             # IC
             u_ic = model(ic_nodes)[0]
-            u_t_ic = model.derivative(ic_nodes, k=(1, 0))[0]
+            # First derivative: u_t_ic
+            grad_t_ic = torch.autograd.grad(u_ic.sum(), ic_nodes, create_graph=True)
+            u_t_ic = grad_t_ic[1]
+            # Enforce periodic boundary conditions at t nodes
+            u_periodic_t0 = model(
+                [
+                    pde_nodes[0],
+                    torch.tensor(
+                        [self.domain[1][0]],
+                        dtype=pde_nodes[1].dtype,
+                        device=model.device,
+                        requires_grad=True,
+                    ),
+                ]
+            )
+            u_periodic_t1 = model(
+                [
+                    pde_nodes[0],
+                    torch.tensor(
+                        [self.domain[1][1]],
+                        dtype=pde_nodes[1].dtype,
+                        device=model.device,
+                        requires_grad=True,
+                    ),
+                ]
+            )
 
         # PDE loss
         pde_residual = u_tt - self.c**2 * u_xx
         pde_loss = torch.mean(pde_residual**2)
+
         # IC loss
         ic_residual = u_ic - self.u_0(ic_nodes[1])
         ic_dt_residual = u_t_ic - self.u_0_t(ic_nodes[1])
         ic_loss = torch.mean(ic_residual**2) + torch.mean(ic_dt_residual**2)
+
         # Periodic boundary conditions loss
         pbc_loss = torch.mean((u_periodic_t0 - u_periodic_t1) ** 2)
+
+        loss_names = ["pde_loss", "ic_loss", "pbc_loss"]
+        return dict(zip(loss_names, [pde_loss, ic_loss, pbc_loss]))
+
+    def get_pde_loss(
+        self,
+        model: nn.Module,
+        pde_nodes: List[torch.Tensor],
+        ic_nodes: List[torch.Tensor],  # [torch.tensor(0), nodes]
+        ic_weight: float = 1,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # Total loss
-        loss = pde_loss + ic_weight * (ic_loss + pbc_loss)
-        return loss, pde_loss, ic_loss + pbc_loss
+        loss_dict = self.get_loss_dict(model, pde_nodes, ic_nodes, ic_weight)
+
+        pde_weight = self.loss_weights.get("pde_loss_weight", 1.0)
+        ic_weight = self.loss_weights.get("ic_loss_weight", 1.0)
+        pbc_weight = self.loss_weights.get("pbc_loss_weight", 1.0)
+
+        loss = (
+            (pde_weight * loss_dict["pde_loss"])
+            + (ic_weight * ic_weight * loss_dict["ic_loss"])
+            + (ic_weight * pbc_weight * loss_dict["pbc_loss"])
+        )
+
+        return (
+            loss,
+            loss_dict["pde_loss"],
+            loss_dict["ic_loss"] + loss_dict["pbc_loss"],
+        )
 
     # Get the least squares problem equivalent to a spectral solve
-    # TODO JL 1/22/25: add periodic boundary conditions
+    # TODO JL 1/22/25: add periodic boundary conditions and debug
     def get_least_squares(self, model: SpectralInterpolationND):
         n_t, n_x = model.nodes[0].shape[0], model.nodes[1].shape[0]
 
@@ -126,6 +207,7 @@ class Wave(BasePDE):
         A = torch.cat([L, IC, D_t_IC], dim=0)
         return A, b
 
+    # TODO JL 1/22/25: add periodic boundary conditions and debug
     def fit_least_squares(self, model: SpectralInterpolationND):
         A, b = self.get_least_squares(model)
         u = torch.linalg.lstsq(A, b).solution
@@ -143,7 +225,6 @@ class Wave(BasePDE):
 
 
 if __name__ == "__main__":
-
     args = argparse.ArgumentParser()
     args.add_argument("--c", type=float, default=2)
     args.add_argument("--beta", type=float, default=5)
@@ -152,6 +233,13 @@ if __name__ == "__main__":
     args.add_argument("--sample_type", type=str, default="standard")
     args.add_argument("--method", type=str, default="adam")
     args.add_argument("--n_epochs", type=int, default=100000)
+    args.add_argument("--eval_every", type=int, default=1000)
+
+    # lwup is one of [grad_norm, none].
+    args.add_argument("--loss_weight_update_policy", "-lwup", type=str, default="none")
+    args.add_argument("--loss_weight_update_interval", "-lwui", type=int, default=-1)
+    args.add_argument("--loss_weight_max", "-lmw", type=float, default=100.0)
+
     args = args.parse_args()
 
     torch.random.manual_seed(0)
@@ -161,40 +249,113 @@ if __name__ == "__main__":
     # Problem setup
     c = args.c
     beta = args.beta
-    pde = Wave(c=c, beta=beta, device=device)
-    save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/wave/c={c}_beta={beta}_method={args.method}_n_t={args.n_t}_n_x={args.n_x}"
+    pde = Wave(
+        c=c,
+        beta=beta,
+        loss_weight_update_policy=args.loss_weight_update_policy,
+        loss_weight_update_interval=args.loss_weight_update_interval,
+        loss_weight_max=args.loss_weight_max,
+        device=device,
+    )
 
+    base_save_dir = (
+        f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/wave/c={c}_beta={beta}"
+    )
+
+    # Evaluation setup (shared for all methods)
+    eval_every = args.eval_every
+    n_eval = 200
+    t_eval = torch.linspace(
+        pde.domain[0][0],
+        pde.domain[0][1],
+        n_eval,
+        device=device,
+        requires_grad=True,
+    )
+    x_eval = torch.linspace(
+        pde.domain[1][0],
+        pde.domain[1][1],
+        n_eval,
+        device=device,
+        requires_grad=True,
+    )
+
+    def eval_sampler():
+        return t_eval, x_eval
+
+    eval_metrics = [l2_error, max_error, l2_relative_error]
+
+    #########################################################
+    # 1. Neural network
+    #########################################################
+    save_dir = os.path.join(base_save_dir, f"mlp")
     # Logger setup
     logger = Logger(path=os.path.join(save_dir, "logger.json"))
 
-    # Evaluation setup
-    n_eval = 200
-    t_eval = torch.linspace(pde.domain[0][0], pde.domain[0][1], n_eval, device=device)
-    x_eval = torch.linspace(pde.domain[1][0], pde.domain[1][1], n_eval, device=device)
-
-    # TODO JL 1/24/25: fix least squares
-    """
-    # Baseline: least squares
-    print("Fitting model with least squares...")
-    n_t_ls = args.n_t
-    n_x_ls = args.n_x
-    bases_ls = ["chebyshev", "chebyshev"]
-    model_ls = SpectralInterpolationND(
-        Ns=[n_t_ls, n_x_ls],
-        bases=bases_ls,
-        domains=pde.domain,
+    # Model setup
+    model_mlp = MLP(
+        n_dim=2,
+        hidden_dim=32,
+        activation=torch.tanh,
         device=device,
     )
-    model_ls = pde.fit_least_squares(model_ls)
-    pde.plot_solution(
-        [t_eval, x_eval],
-        model_ls.interpolate([t_eval, x_eval]).detach(),
-        save_path=os.path.join(save_dir, "wave_ls_solution.png"),
+
+    # Training setup
+    n_epochs = args.n_epochs
+    # lr = 1e-3
+    optimizer = pde.get_optimizer(model_mlp, args.method)
+
+    n_t_train = 161
+    n_x_train = 161
+    n_ic_train = 161
+    ic_weight = 10
+
+    def pde_sampler():
+        t_nodes = pde.sample_domain_1d(
+            n_samples=n_t_train,
+            dim=0,
+            basis="fourier",
+            type=args.sample_type,
+        )
+        x_nodes = pde.sample_domain_1d(
+            n_samples=n_x_train,
+            dim=1,
+            basis="fourier",
+            type=args.sample_type,
+        )
+        return [t_nodes, x_nodes]
+
+    def ic_sampler():
+        ic_nodes = pde.sample_domain_1d(
+            n_samples=n_ic_train,
+            dim=1,
+            basis="fourier",
+            type=args.sample_type,
+        )
+        return [torch.tensor([0.0], device=device, requires_grad=True), ic_nodes]
+
+    print(f"Training MLP with {args.method} optimizer...")
+    pde.train(
+        model_mlp,
+        n_epochs=args.n_epochs,
+        optimizer=optimizer,
+        pde_sampler=pde_sampler,
+        ic_sampler=ic_sampler,
+        ic_weight=ic_weight,
+        eval_sampler=eval_sampler,
+        eval_metrics=eval_metrics,
+        eval_every=eval_every,
+        save_dir=save_dir,
     )
-    """
+
+    #########################################################
+    # 2. Polynomial interpolation
+    #########################################################
+    save_dir = os.path.join(base_save_dir, f"polynomial")
+    # Logger setup
+    logger = Logger(path=os.path.join(save_dir, "logger.json"))
 
     # Model setup
-    print("Training model with first-order method...")
     n_t = args.n_t
     n_x = args.n_x
     bases = ["chebyshev", "chebyshev"]
@@ -207,15 +368,9 @@ if __name__ == "__main__":
 
     # Training setup
     n_epochs = args.n_epochs
-    eval_every = 1000
-    lr = 1e-3
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    if args.sample_type == "standard":
-        sample_type = ["standard", "standard"]
-    elif args.sample_type == "uniform":
-        sample_type = ["uniform", "uniform"]
-    else:
-        raise ValueError(f"Invalid sample type: {args.sample_type}")
+    # lr = 1e-3
+    optimizer = pde.get_optimizer(model, args.method)
+
     n_t_train = 161
     n_x_train = 161
     n_ic_train = 161
@@ -226,13 +381,13 @@ if __name__ == "__main__":
             n_samples=n_t_train,
             dim=0,
             basis=bases[0],
-            type=sample_type[0],
+            type=args.sample_type,
         )
         x_nodes = pde.sample_domain_1d(
             n_samples=n_x_train,
             dim=1,
             basis=bases[1],
-            type=sample_type[1],
+            type=args.sample_type,
         )
         return [t_nodes, x_nodes]
 
@@ -241,65 +396,20 @@ if __name__ == "__main__":
             n_samples=n_ic_train,
             dim=1,
             basis=bases[1],
-            type=sample_type[1],
+            type=args.sample_type,
         )
-        return [torch.tensor([0.0], device=device), ic_nodes]
+        return [torch.tensor([0.0], device=device, requires_grad=True), ic_nodes]
 
-    def eval_sampler():
-        return t_eval, x_eval
-
-    eval_metrics = [l2_error, max_error, l2_relative_error]
-
-    if args.method == "adam":
-        # Train model with Adam
-        pde.train_model(
-            model,
-            n_epochs=n_epochs,
-            optimizer=optimizer,
-            pde_sampler=pde_sampler,
-            ic_sampler=ic_sampler,
-            ic_weight=ic_weight,
-            eval_sampler=eval_sampler,
-            eval_metrics=eval_metrics,
-            eval_every=eval_every,
-            save_dir=save_dir,
-            logger=logger,
-        )
-    elif args.method == "lbfgs":
-        # Train model with L-BFGS
-        optimizer = torch.optim.LBFGS(model.parameters(), history_size=100)
-        pde.train_model_lbfgs(
-            model,
-            n_epochs=n_epochs,
-            optimizer=optimizer,
-            pde_sampler=pde_sampler,
-            ic_sampler=ic_sampler,
-            ic_weight=ic_weight,
-            eval_sampler=eval_sampler,
-            eval_metrics=eval_metrics,
-            eval_every=10,
-            save_dir=save_dir,
-            logger=logger,
-        )
-    elif args.method == "nys_newton":
-        # Train model with Nys-Newton
-        optimizer = NysNewtonCG(
-            model.parameters(),
-            lr=1.0,
-            rank=100,  # rank of Nyström approximation
-            mu=1e-2,  # damping parameter
-            line_search_fn="armijo",
-        )
-        pde.train_model_nys_newton(
-            model,
-            n_epochs=n_epochs,
-            optimizer=optimizer,
-            pde_sampler=pde_sampler,
-            ic_sampler=ic_sampler,
-            ic_weight=ic_weight,
-            eval_sampler=eval_sampler,
-            eval_metrics=eval_metrics,
-            eval_every=10,
-            save_dir=save_dir,
-            logger=logger,
-        )
+    print(f"Training Polynomial Interpolant with {args.method} optimizer...")
+    pde.train(
+        model,
+        n_epochs=args.n_epochs,
+        optimizer=optimizer,
+        pde_sampler=pde_sampler,
+        ic_sampler=ic_sampler,
+        ic_weight=ic_weight,
+        eval_sampler=eval_sampler,
+        eval_metrics=eval_metrics,
+        eval_every=eval_every,
+        save_dir=save_dir,
+    )

@@ -2,14 +2,13 @@ import argparse
 import os
 import torch
 import torch.nn as nn
-from typing import List, Callable, Tuple
+from typing import List, Callable, Tuple, Dict
 
 from src.experiments.pdes.base_pde import BasePDE
 from src.models.interpolant_nd import SpectralInterpolationND
+from src.models.mlp import MLP
 from src.utils.metrics import l2_error, max_error, l2_relative_error
 from src.loggers.logger import Logger
-
-from src.optimizers.nys_newton_cg import NysNewtonCG
 
 """
 1D Reaction equation:
@@ -31,8 +30,11 @@ class Reaction(BasePDE):
         t_final: float = 1,
         u_0: Callable = None,
         device: str = "cpu",
+        **base_kwargs,
     ):
-        super().__init__("reaction", [(0, 1), (0, 2 * torch.pi)], device=device)
+        super().__init__(
+            "reaction", [(0, 1), (0, 2 * torch.pi)], device=device, **base_kwargs
+        )
         self.rho = rho
         self.t_final = t_final
         if u_0 is None:
@@ -51,14 +53,14 @@ class Reaction(BasePDE):
         t_mesh, x_mesh = torch.meshgrid(nodes[0], nodes[1], indexing="ij")
         return self.exact_solution(t_mesh, x_mesh)
 
-    def get_pde_loss(
+    def get_loss_dict(
         self,
         model: nn.Module,
         pde_nodes: List[torch.Tensor],
         ic_nodes: List[torch.Tensor],  # [torch.tensor(0), nodes]
         ic_weight: float = 1,
         **kwargs,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Dict[str, torch.Tensor]:
 
         n_t, n_x = pde_nodes[0].shape[0], pde_nodes[1].shape[0]
         n_ic = ic_nodes[1].shape[0]
@@ -71,39 +73,100 @@ class Reaction(BasePDE):
             u_ic = model.interpolate(ic_nodes)[0]  # (N_ic)
             # Enforce periodic boundary conditions at t nodes
             u_periodic_t0 = model.interpolate(
-                [pde_nodes[0], torch.tensor([model.domains[1][0]], device=model.device)]
+                [
+                    pde_nodes[0],
+                    torch.tensor(
+                        [self.domain[1][0]],
+                        dtype=pde_nodes[1].dtype,
+                        device=model.device,
+                        requires_grad=True,
+                    ),
+                ]
             )
             u_periodic_t1 = model.interpolate(
-                [pde_nodes[0], torch.tensor([model.domains[1][1]], device=model.device)]
+                [
+                    pde_nodes[0],
+                    torch.tensor(
+                        [self.domain[1][1]],
+                        dtype=pde_nodes[1].dtype,
+                        device=model.device,
+                        requires_grad=True,
+                    ),
+                ]
             )
         else:
             # PDE
-            u = model(pde_nodes).reshape(n_t, n_x)
-            grads = torch.autograd.grad(u.sum(), pde_nodes, create_graph=True)[
-                0
-            ]  # (N_t*N_x, 2)
-            u_t = grads[:, 0].reshape(n_t, n_x)
+            grid = model.make_grid(pde_nodes)
+            u = model.forward_grid(grid).reshape(n_t, n_x)
+            grads = torch.autograd.grad(
+                u.sum(), grid, create_graph=True
+            )  # (N_t*N_x, 2)
+            u_t = grads[0][:, :, 0].reshape(n_t, n_x)
             # IC
             u_ic = model(ic_nodes).reshape(n_ic)
             # Enforce periodic boundary conditions at t nodes
             u_periodic_t0 = model(
-                [pde_nodes[0], torch.tensor([model.domains[1][0]], device=model.device)]
+                [
+                    pde_nodes[0],
+                    torch.tensor(
+                        [self.domain[1][0]],
+                        dtype=pde_nodes[1].dtype,
+                        device=model.device,
+                        requires_grad=True,
+                    ),
+                ]
             )
             u_periodic_t1 = model(
-                [pde_nodes[0], torch.tensor([model.domains[1][1]], device=model.device)]
+                [
+                    pde_nodes[0],
+                    torch.tensor(
+                        [self.domain[1][1]],
+                        dtype=pde_nodes[1].dtype,
+                        device=model.device,
+                        requires_grad=True,
+                    ),
+                ]
             )
 
         # PDE loss
         pde_residual = u_t - self.rho * u * (1 - u)
         pde_loss = torch.mean(pde_residual**2)
+
         # IC loss
         ic_residual = u_ic - self.u_0(ic_nodes[1])
         ic_loss = torch.mean(ic_residual**2)
+
         # Periodic boundary conditions loss
         pbc_loss = torch.mean((u_periodic_t0 - u_periodic_t1) ** 2)
-        # Total loss
-        loss = pde_loss + ic_weight * (ic_loss + pbc_loss)
-        return loss, pde_loss, ic_loss + pbc_loss
+
+        loss_names = ["pde_loss", "ic_loss", "pbc_loss"]
+        return dict(zip(loss_names, [pde_loss, ic_loss, pbc_loss]))
+
+    def get_pde_loss(
+        self,
+        model: nn.Module,
+        pde_nodes: List[torch.Tensor],
+        ic_nodes: List[torch.Tensor],  # [torch.tensor(0), nodes]
+        ic_weight: float = 1,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        loss_dict = self.get_loss_dict(model, pde_nodes, ic_nodes, ic_weight)
+
+        pde_weight = self.loss_weights.get("pde_loss_weight", 1.0)
+        ic_weight = self.loss_weights.get("ic_loss_weight", 1.0)
+        pbc_weight = self.loss_weights.get("pbc_loss_weight", 1.0)
+
+        loss = (
+            (pde_weight * loss_dict["pde_loss"])
+            + (ic_weight * ic_weight * loss_dict["ic_loss"])
+            + (ic_weight * pbc_weight * loss_dict["pbc_loss"])
+        )
+
+        return (
+            loss,
+            loss_dict["pde_loss"],
+            loss_dict["ic_loss"] + loss_dict["pbc_loss"],
+        )
 
     # Get the least squares problem equivalent to a spectral solve
     # Since this problem is nonlinear, we perform Picard iteration using the model's current guess for u

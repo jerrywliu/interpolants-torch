@@ -3,6 +3,9 @@ import os
 import torch
 from typing import List, Tuple
 
+from src.optimizers.shampoo import Shampoo
+from src.optimizers.nys_newton_cg import NysNewtonCG
+
 
 # Base class for all functions, including interpolation and PDEs.
 # Note that the primitive for eval points, both during sampling and during evaluation, is a list of tensors, which defines a grid of points.
@@ -104,13 +107,13 @@ class BaseFcn:
         save_path: str = None,
     ):
         u_cpu = u.detach().cpu()
-        u_true = self.get_solution(nodes).cpu()
+        u_true = self.get_solution(nodes).detach().cpu()
         errors = torch.abs(u_cpu - u_true)
 
         if self.n_dims == 1:
 
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
-            nodes_cpu = nodes[0].cpu()
+            nodes_cpu = nodes[0].detach().cpu()
 
             # Plot 1: predicted solution
             ax1.plot(nodes_cpu, u_cpu, "b-", label="Predicted")
@@ -186,3 +189,35 @@ class BaseFcn:
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             plt.savefig(save_path)
             plt.close()
+
+    def get_optimizer(self, model, optimizer_name, **override_kwargs):
+        optimizer_dict = {
+            "adam": {
+                "constructor": torch.optim.Adam,
+                "kwargs": {"lr": 1e-3},
+            },
+            "lbfgs": {
+                "constructor": torch.optim.LBFGS,
+                "kwargs": {"history_size": 1000},
+            },
+            "shampoo": {
+                "constructor": Shampoo,
+                "kwargs": {"lr": 1e-3, "update_freq": 1},
+            },
+            "nys_newton": {
+                "constructor": NysNewtonCG,
+                "kwargs": {
+                    "lr": 1.0,
+                    "rank": 100,
+                    "mu": 1e-2,
+                    "line_search_fn": "armijo",
+                },
+            },
+        }
+
+        entry = optimizer_dict[optimizer_name]
+        constructor = entry["constructor"]
+        kwargs = entry["kwargs"]
+        kwargs.update(override_kwargs)
+
+        return constructor(model.parameters(), **kwargs)
