@@ -1,16 +1,14 @@
 import argparse
-import matplotlib.pyplot as plt
 import os
 import scipy.io
-from time import time
 import torch
 import torch.nn as nn
-from tqdm import tqdm
-from typing import List, Callable, Tuple
+from typing import List
 
 from src.experiments.pdes.base_pde import BasePDE
 from src.models.interpolant_nd import SpectralInterpolationND
 from src.utils.metrics import l2_error, max_error, l2_relative_error
+from src.loggers.logger import Logger
 
 from src.optimizers.nys_newton_cg import NysNewtonCG
 
@@ -25,9 +23,12 @@ u(t, x=-1) = u(t, x=1) = 0
 
 
 class AllenCahn(BasePDE):
-    def __init__(self, eps: float = 1e-4, device: str = "cpu"):
-        super().__init__("allen_cahn", [(0, 1), (-1, 1)])
-        self.device = torch.device(device)
+    def __init__(
+        self,
+        eps: float = 1e-4,
+        device: str = "cpu",
+    ):
+        super().__init__("allen_cahn", [(0, 1), (-1, 1)], device=device)
         self.eps = eps
         self.u_0 = lambda x: x**2 * torch.cos(torch.pi * x)
         self.ref_u, self.ref_t, self.ref_x = self.load_ref_soln()
@@ -54,8 +55,6 @@ class AllenCahn(BasePDE):
         ic_weight: float = 1,
         **kwargs,
     ) -> torch.Tensor:
-        if ic_nodes is None:
-            ic_nodes = [torch.tensor([0.0]), pde_nodes[-1]]
 
         n_t, n_x = pde_nodes[0].shape[0], pde_nodes[1].shape[0]
         n_ic = ic_nodes[1].shape[0]
@@ -69,10 +68,10 @@ class AllenCahn(BasePDE):
             u_ic = model.interpolate(ic_nodes)[0]
             # Enforce periodic boundary conditions at t nodes
             u_periodic_t0 = model.interpolate(
-                [pde_nodes[0], torch.tensor([model.domains[1][0]]).to(model.device)]
+                [pde_nodes[0], torch.tensor([model.domains[1][0]], device=model.device)]
             )
             u_periodic_t1 = model.interpolate(
-                [pde_nodes[0], torch.tensor([model.domains[1][1]]).to(model.device)]
+                [pde_nodes[0], torch.tensor([model.domains[1][1]], device=model.device)]
             )
         else:
             # PDE
@@ -111,62 +110,7 @@ class AllenCahn(BasePDE):
         u: torch.Tensor,  # (N_t, N_x)
         save_path: str = None,
     ):
-        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 4))
-        u_cpu = u.detach().cpu()
-        # Predicted solution
-        im1 = ax1.imshow(
-            u_cpu.T,
-            extent=[
-                self.domain[0][0],
-                self.domain[0][1],
-                self.domain[1][0],
-                self.domain[1][1],
-            ],
-            origin="lower",
-            aspect="auto",
-        )
-        plt.colorbar(im1, ax=ax1)
-        ax1.set_title("Predicted Solution")
-
-        # True solution
-        u_true = self.get_solution(nodes).cpu()
-        im2 = ax2.imshow(
-            u_true.T,
-            extent=[
-                self.domain[0][0],
-                self.domain[0][1],
-                self.domain[1][0],
-                self.domain[1][1],
-            ],
-            origin="lower",
-            aspect="auto",
-        )
-        plt.colorbar(im2, ax=ax2)
-        ax2.set_title("True Solution")
-
-        # Error on log scale
-        error = torch.abs(u_cpu - u_true)
-        im3 = ax3.imshow(
-            error.T,
-            extent=[
-                self.domain[0][0],
-                self.domain[0][1],
-                self.domain[1][0],
-                self.domain[1][1],
-            ],
-            origin="lower",
-            aspect="auto",
-            norm="log",
-        )
-        plt.colorbar(im3, ax=ax3)
-        ax3.set_title("Error")
-
-        plt.tight_layout()
-
-        if save_path is not None:
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            plt.savefig(save_path)
-            plt.close()
+        self._plot_solution_default(nodes, u, save_path)
 
 
 if __name__ == "__main__":
@@ -180,6 +124,7 @@ if __name__ == "__main__":
     args.add_argument("--n_epochs", type=int, default=100000)
     args = args.parse_args()
 
+    torch.random.manual_seed(0)
     torch.set_default_dtype(torch.float64)
     device = "cuda"
 
@@ -187,6 +132,9 @@ if __name__ == "__main__":
     eps = args.eps
     pde = AllenCahn(eps=eps, device=device)
     save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/allen_cahn/eps={eps}_method={args.method}_n_epochs={args.n_epochs}"
+
+    # Logger setup
+    logger = Logger(path=os.path.join(save_dir, "logger.json"))
 
     # Evaluation setup
     n_eval = 200
@@ -206,7 +154,7 @@ if __name__ == "__main__":
 
     # Training setup
     n_epochs = args.n_epochs
-    plot_every = 1000
+    eval_every = 1000
     lr = 1e-3
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     if args.sample_type == "standard":
@@ -216,8 +164,6 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"Invalid sample type: {args.sample_type}")
     n_t_train = 161
-    # n_x_train = 160
-    # n_ic_train = 160
     n_x_train = 161
     n_ic_train = 161
     ic_weight = 10
@@ -244,7 +190,7 @@ if __name__ == "__main__":
             basis=bases[1],
             type=sample_type[1],
         )
-        return [torch.tensor([0.0]).to(device), ic_nodes]
+        return [torch.tensor([0.0], device=device), ic_nodes]
 
     def eval_sampler():
         return t_eval, x_eval
@@ -262,23 +208,25 @@ if __name__ == "__main__":
             ic_weight=ic_weight,
             eval_sampler=eval_sampler,
             eval_metrics=eval_metrics,
-            plot_every=plot_every,
+            eval_every=eval_every,
             save_dir=save_dir,
+            logger=logger,
         )
     elif args.method == "lbfgs":
         # Train model with L-BFGS
         optimizer = torch.optim.LBFGS(model.parameters(), history_size=100)
         pde.train_model_lbfgs(
             model,
-            max_iter=n_epochs,
+            n_epochs=n_epochs,
             optimizer=optimizer,
             pde_sampler=pde_sampler,
             ic_sampler=ic_sampler,
             ic_weight=ic_weight,
             eval_sampler=eval_sampler,
             eval_metrics=eval_metrics,
-            plot_every=plot_every,
+            eval_every=10,
             save_dir=save_dir,
+            logger=logger,
         )
     elif args.method == "nys_newton":
         # Train model with Nys-Newton
@@ -291,13 +239,14 @@ if __name__ == "__main__":
         )
         pde.train_model_nys_newton(
             model,
-            max_iter=n_epochs,
+            n_epochs=n_epochs,
             optimizer=optimizer,
             pde_sampler=pde_sampler,
             ic_sampler=ic_sampler,
             ic_weight=ic_weight,
             eval_sampler=eval_sampler,
             eval_metrics=eval_metrics,
-            plot_every=10,
+            eval_every=10,
             save_dir=save_dir,
+            logger=logger,
         )

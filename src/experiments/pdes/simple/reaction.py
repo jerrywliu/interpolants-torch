@@ -1,10 +1,7 @@
 import argparse
-import matplotlib.pyplot as plt
 import os
-from time import time
 import torch
 import torch.nn as nn
-from tqdm import tqdm
 from typing import List, Callable, Tuple
 
 from src.experiments.pdes.base_pde import BasePDE
@@ -12,7 +9,6 @@ from src.models.interpolant_nd import SpectralInterpolationND
 from src.utils.metrics import l2_error, max_error, l2_relative_error
 from src.loggers.logger import Logger
 
-from src.optimizers.shampoo import Shampoo
 from src.optimizers.nys_newton_cg import NysNewtonCG
 
 """
@@ -63,8 +59,6 @@ class Reaction(BasePDE):
         ic_weight: float = 1,
         **kwargs,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if ic_nodes is None:
-            ic_nodes = [torch.tensor([0.0]), pde_nodes[-1]]
 
         n_t, n_x = pde_nodes[0].shape[0], pde_nodes[1].shape[0]
         n_ic = ic_nodes[1].shape[0]
@@ -77,10 +71,10 @@ class Reaction(BasePDE):
             u_ic = model.interpolate(ic_nodes)[0]  # (N_ic)
             # Enforce periodic boundary conditions at t nodes
             u_periodic_t0 = model.interpolate(
-                [pde_nodes[0], torch.tensor([model.domains[1][0]]).to(model.device)]
+                [pde_nodes[0], torch.tensor([model.domains[1][0]], device=model.device)]
             )
             u_periodic_t1 = model.interpolate(
-                [pde_nodes[0], torch.tensor([model.domains[1][1]]).to(model.device)]
+                [pde_nodes[0], torch.tensor([model.domains[1][1]], device=model.device)]
             )
         else:
             # PDE
@@ -93,10 +87,10 @@ class Reaction(BasePDE):
             u_ic = model(ic_nodes).reshape(n_ic)
             # Enforce periodic boundary conditions at t nodes
             u_periodic_t0 = model(
-                [pde_nodes[0], torch.tensor([model.domains[1][0]]).to(model.device)]
+                [pde_nodes[0], torch.tensor([model.domains[1][0]], device=model.device)]
             )
             u_periodic_t1 = model(
-                [pde_nodes[0], torch.tensor([model.domains[1][1]]).to(model.device)]
+                [pde_nodes[0], torch.tensor([model.domains[1][1]], device=model.device)]
             )
 
         # PDE loss
@@ -121,12 +115,12 @@ class Reaction(BasePDE):
         L = D_t
 
         # Initial condition: extract t=0 values
-        IC = torch.zeros(n_x, n_t * n_x).to(dtype=model.values.dtype)
+        IC = torch.zeros(n_x, n_t * n_x, device=model.device, dtype=model.values.dtype)
         for i in range(n_x):
             IC[i, n_x * (n_t - 1) + i] = 1  # Set t=0 value to 1 for each x
 
         # Right hand side
-        b = torch.zeros(n_t * n_x + n_x, dtype=model.values.dtype)
+        b = torch.zeros(n_t * n_x + n_x, device=model.device, dtype=model.values.dtype)
         # Picard iteration: calculate rho * u_0(x) * (1 - u_0(x))
         L_rhs = self.rho * model(model.nodes) * (1 - model(model.nodes))  # (N_t*N_x)
         b[: n_t * n_x] = L_rhs
@@ -170,6 +164,7 @@ if __name__ == "__main__":
     args.add_argument("--n_epochs", type=int, default=100000)
     args = args.parse_args()
 
+    torch.random.manual_seed(0)
     torch.set_default_dtype(torch.float64)
     device = "cuda"
 
@@ -180,12 +175,13 @@ if __name__ == "__main__":
     pde = Reaction(rho=rho, t_final=t_final, u_0=u_0, device=device)
     save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/reaction/rho={rho}_method={args.method}_n_t={args.n_t}_n_x={args.n_x}"
 
+    # Logger setup
     logger = Logger(path=os.path.join(save_dir, "logger.json"))
 
     # Evaluation setup
     n_eval = 200
-    t_eval = torch.linspace(pde.domain[0][0], pde.domain[0][1], n_eval).to(device)
-    x_eval = torch.linspace(pde.domain[1][0], pde.domain[1][1], n_eval).to(device)
+    t_eval = torch.linspace(pde.domain[0][0], pde.domain[0][1], n_eval, device=device)
+    x_eval = torch.linspace(pde.domain[1][0], pde.domain[1][1], n_eval, device=device)
 
     # Model setup
     print("Training model with first-order method...")
@@ -238,7 +234,7 @@ if __name__ == "__main__":
             basis=bases[1],
             type=sample_type[1],
         )
-        return [torch.tensor([0.0]).to(device), ic_nodes]
+        return [torch.tensor([0.0], device=device), ic_nodes]
 
     def eval_sampler():
         return t_eval, x_eval
@@ -282,7 +278,7 @@ if __name__ == "__main__":
             model.parameters(),
             lr=1.0,
             rank=100,  # rank of Nyström approximation
-            mu=1e-2,  # damping parameter
+            mu=1e-4,  # damping parameter
             cg_max_iters=1000,
             line_search_fn="armijo",
         )
