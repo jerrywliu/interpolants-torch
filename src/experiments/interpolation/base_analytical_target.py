@@ -136,7 +136,7 @@ class BaseAnalyticalTarget(BaseFcn):
         plt.close()
 
 
-# TODO JL 1/24/25: Add L-BFGS, Nyström Newton-CG
+# TODO JL 1/24/25: Add L-BFGS, Nyström Newton-CG. Wrap within self.train.
 
 
 if __name__ == "__main__":

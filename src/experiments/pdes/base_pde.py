@@ -5,6 +5,9 @@ import torch.nn as nn
 from tqdm import tqdm
 from typing import List, Tuple, Callable
 
+from src.optimizers.shampoo import Shampoo
+from src.optimizers.nys_newton_cg import NysNewtonCG
+
 from src.experiments.base_fcn import BaseFcn
 from src.loggers.logger import Logger
 
@@ -15,12 +18,46 @@ class BasePDE(BaseFcn):
         name: str,
         domain: List[Tuple[float, float]],
         device: str = "cpu",
+        loss_weight_update_policy: str = "grad_norm",
+        loss_weight_update_interval: int = -1,
+        loss_weight_max: float = 100.0,
     ):
         super().__init__(name, domain, device)
+
+        self.loss_weights = {}
+        self.loss_weight_max = loss_weight_max
+        self.loss_weight_update_policy = loss_weight_update_policy
+        self.loss_weight_update_interval = loss_weight_update_interval
 
     # Input: x = [(n_1,), ..., (n_d,)]
     # Output: u = (n_1 * ... * n_d,)
     def get_solution(self, x: List[torch.Tensor]) -> torch.Tensor:
+        raise NotImplementedError
+
+    def sample_domain_1d(
+        self, n_samples: int, dim: int, basis: str, type: str
+    ) -> torch.Tensor:
+        """Sample points from domain with requires_grad=True"""
+        points = super().sample_domain_1d(n_samples, dim, basis, type)
+        points.requires_grad_(True)
+        return points
+
+    def sample_domain(
+        self, n_samples: int, dim: int, basis: str, type: str
+    ) -> List[torch.Tensor]:
+        """Sample points from domain with requires_grad=True"""
+        points = super().sample_domain(n_samples, dim, basis, type)
+        points = [p.requires_grad_(True) for p in points]
+        return points
+
+    def get_loss_dict(
+        self,
+        model: nn.Module,
+        pde_nodes: List[torch.Tensor],
+        ic_nodes: List[torch.Tensor],  # [torch.tensor(0), nodes]
+        ic_weight: float = 1,
+        **kwargs,
+    ):
         raise NotImplementedError
 
     def get_pde_loss(
@@ -37,6 +74,78 @@ class BasePDE(BaseFcn):
         self, nodes: List[torch.Tensor], u: torch.Tensor, save_path: str = None
     ):
         raise NotImplementedError
+
+    def update_loss_weights(self, epoch, model, optimizer, pde_nodes, ic_nodes):
+        if (
+            self.loss_weight_update_interval == -1
+            or epoch % self.loss_weight_update_interval != 0
+        ):
+            return
+
+        loss_dict = self.get_loss_dict(model, pde_nodes, ic_nodes)
+        loss_names = loss_dict.keys()
+
+        if self.loss_weight_update_policy != "grad_norm":
+            return
+
+        self.loss_weights = {}
+        num_params = sum(p.numel() for p in model.parameters())
+
+        for loss_name in loss_names:
+            optimizer.zero_grad()
+            curr_loss = self.get_loss_dict(model, pde_nodes, ic_nodes)[loss_name]
+            optimizer.zero_grad()
+            curr_loss.backward(retain_graph=True)
+            curr_loss_avg_grad_norm = (
+                torch.sqrt(
+                    sum(
+                        [
+                            torch.sum(p.grad**2)
+                            for p in model.parameters()
+                            if p.grad is not None
+                        ]
+                    )
+                )  # TODO JL 1/25/25 why is the bias of MLP.fc2's grad=None?
+                / num_params
+            )
+            # TODO JL 1/25/25 I don't think this logic is correct. We want one of the loss weights to be 1.0 and the rest to be scaled accordingly.
+            self.loss_weights[f"{loss_name}_weight"] = min(
+                1.0 / curr_loss_avg_grad_norm, self.loss_weight_max
+            )
+
+        print(self.loss_weights)
+
+    def get_optimizer(self, model, optimizer_name, **override_kwargs):
+        optimizer_dict = {
+            "adam": {
+                "constructor": torch.optim.Adam,
+                "kwargs": {"lr": 1e-3},
+            },
+            "lbfgs": {
+                "constructor": torch.optim.LBFGS,
+                "kwargs": {"history_size": 1000},
+            },
+            "shampoo": {
+                "constructor": Shampoo,
+                "kwargs": {"lr": 1e-3, "update_freq": 1},
+            },
+            "nys_newton": {
+                "constructor": NysNewtonCG,
+                "kwargs": {
+                    "lr": 1.0,
+                    "rank": 100,
+                    "mu": 1e-4,
+                    "line_search_fn": "armijo",
+                },
+            },
+        }
+
+        entry = optimizer_dict[optimizer_name]
+        constructor = entry["constructor"]
+        kwargs = entry["kwargs"]
+        kwargs.update(override_kwargs)
+
+        return constructor(model.parameters(), **kwargs)
 
     def train_model(
         self,
@@ -62,6 +171,9 @@ class BasePDE(BaseFcn):
             # Sample points
             pde_nodes = pde_sampler()
             ic_nodes = ic_sampler()
+
+            # Update loss weights
+            self.update_loss_weights(epoch, model, optimizer, pde_nodes, ic_nodes)
 
             # Train step
             optimizer.zero_grad()
@@ -96,11 +208,11 @@ class BasePDE(BaseFcn):
                             f"eval_{eval_metric.__name__}", eval_metric_value, epoch
                         )
 
-                    # Evaluate PDE loss
-                    _, eval_pde_loss, _ = self.get_pde_loss(
-                        model, eval_nodes, ic_nodes, ic_weight
-                    )
-                    logger.log("eval_pde_loss", eval_pde_loss.item(), epoch)
+                # Evaluate PDE loss
+                _, eval_pde_loss, _ = self.get_pde_loss(
+                    model, eval_nodes, ic_nodes, ic_weight
+                )
+                logger.log("eval_pde_loss", eval_pde_loss.item(), epoch)
 
                 current_time = time() - start_time
                 print(f"Epoch {epoch + 1} completed in {current_time:.2f} seconds")
@@ -162,6 +274,9 @@ class BasePDE(BaseFcn):
             # Optimize
             loss = optimizer.step(closure)
 
+            # Update loss weights
+            self.update_loss_weights(epoch, model, optimizer, pde_nodes, ic_nodes)
+
             # Log
             logger.log("loss", loss.item(), epoch)
 
@@ -213,7 +328,7 @@ class BasePDE(BaseFcn):
         self,
         model: nn.Module,
         n_epochs: int,
-        optimizer: torch.optim.Optimizer,  # NysNewtonCG optimizer
+        optimizer: NysNewtonCG,  # NysNewtonCG optimizer
         pde_sampler: Callable,
         ic_sampler: Callable,
         ic_weight: float,
@@ -256,6 +371,9 @@ class BasePDE(BaseFcn):
 
             # Optimize
             loss, _ = optimizer.step(closure)
+
+            # Update loss weights
+            self.update_loss_weights(epoch, model, optimizer, pde_nodes, ic_nodes)
 
             # Log
             logger.log("loss", loss.item(), epoch)
@@ -303,3 +421,60 @@ class BasePDE(BaseFcn):
 
                 # Save history
                 logger.save()
+
+    def train(
+        self,
+        model: nn.Module,
+        n_epochs: int,
+        optimizer: torch.optim.Optimizer,
+        pde_sampler: Callable,
+        ic_sampler: Callable,
+        ic_weight: float,
+        eval_sampler: Callable,
+        eval_metrics: List[Callable],
+        eval_every: int = 100,
+        save_dir: str = None,
+        logger: Logger = None,
+    ):
+        if isinstance(optimizer, NysNewtonCG):
+            self.train_model_nys_newton(
+                model,
+                n_epochs,
+                optimizer,
+                pde_sampler,
+                ic_sampler,
+                ic_weight,
+                eval_sampler,
+                eval_metrics,
+                eval_every,
+                save_dir,
+                logger,
+            )
+        elif isinstance(optimizer, torch.optim.LBFGS):
+            self.train_model_lbfgs(
+                model,
+                n_epochs,
+                optimizer,
+                pde_sampler,
+                ic_sampler,
+                ic_weight,
+                eval_sampler,
+                eval_metrics,
+                eval_every,
+                save_dir,
+                logger,
+            )
+        else:
+            self.train_model(
+                model,
+                n_epochs,
+                optimizer,
+                pde_sampler,
+                ic_sampler,
+                ic_weight,
+                eval_sampler,
+                eval_metrics,
+                eval_every,
+                save_dir,
+                logger,
+            )

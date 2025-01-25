@@ -41,6 +41,7 @@ if __name__ == "__main__":
     args = argparse.ArgumentParser()
     args.add_argument("--sample_type", type=str, default="standard")
     args.add_argument("--n_epochs", type=int, default=10000)
+    args.add_argument("--eval_every", type=int, default=100)
     args = args.parse_args()
 
     torch.random.manual_seed(0)
@@ -49,7 +50,13 @@ if __name__ == "__main__":
 
     # Problem setup
     target = Logistic1DTarget(device=device)
-    n_samples = 41
+
+    base_save_dir = (
+        f"/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/logistic_1d"
+    )
+
+    # Evaluation setup (shared for all methods)
+    eval_every = args.eval_every
     n_eval = 200
     x_eval = torch.linspace(
         target.domain[0][0], target.domain[0][1], n_eval, device=device
@@ -58,11 +65,15 @@ if __name__ == "__main__":
     def eval_sampler():
         return [x_eval]
 
+    eval_metrics = [l2_error, max_error, l2_relative_error]
+
+    #########################################################
     # 1. Neural network
-    save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/logistic_1d/mlp_sample={args.sample_type}"
+    #########################################################
+    save_dir = os.path.join(base_save_dir, "mlp")
     n_epochs = args.n_epochs
-    eval_every = 100
     lr = 1e-3
+    n_samples = 41
     basis_type = "fourier"
     sample_type = args.sample_type
 
@@ -72,8 +83,6 @@ if __name__ == "__main__":
             basis=[basis_type],
             type=[sample_type],
         )
-
-    eval_metrics = [l2_error, max_error, l2_relative_error]
 
     model_mlp = MLP(n_dim=1, hidden_dim=32, activation=torch.tanh, device=device)
     optimizer = torch.optim.Adam(model_mlp.parameters(), lr=lr)
@@ -91,11 +100,13 @@ if __name__ == "__main__":
         logger=logger,
     )
 
+    #########################################################
     # 2. Polynomial interpolation
-    save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/logistic_1d/chebyshev_sample={args.sample_type}"
+    #########################################################
+    save_dir = os.path.join(base_save_dir, "chebyshev")
     n_epochs = args.n_epochs
-    eval_every = 100
     lr = 1e-3
+    n_samples = 41
     basis_type = "chebyshev"
     sample_type = args.sample_type
 
@@ -132,11 +143,13 @@ if __name__ == "__main__":
         logger=logger,
     )
 
+    #########################################################
     # 3. Barycentric rational interpolation
-    save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/logistic_1d/rational_sample={args.sample_type}"
+    #########################################################
+    save_dir = os.path.join(base_save_dir, "rational")
     n_epochs = args.n_epochs
-    eval_every = 100
     lr = 1e-3
+    n_samples = 41
     basis_type = "chebyshev"
     sample_type = args.sample_type
 
@@ -170,11 +183,13 @@ if __name__ == "__main__":
         logger=logger,
     )
 
+    #########################################################
     # 4. Barycentric rational interpolation with learnable poles
-    save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/logistic_1d/rational_poles_sample={args.sample_type}"
+    #########################################################
+    save_dir = os.path.join(base_save_dir, "rational_poles")
     n_epochs = args.n_epochs
-    eval_every = 100
     lr = 1e-3
+    n_samples = 41
     basis_type = "chebyshev"
     sample_type = args.sample_type
 

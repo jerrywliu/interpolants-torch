@@ -104,13 +104,13 @@ class BaseFcn:
         save_path: str = None,
     ):
         u_cpu = u.detach().cpu()
-        u_true = self.get_solution(nodes).cpu()
+        u_true = self.get_solution(nodes).detach().cpu()
         errors = torch.abs(u_cpu - u_true)
 
         if self.n_dims == 1:
 
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
-            nodes_cpu = nodes[0].cpu()
+            nodes_cpu = nodes[0].detach().cpu()
 
             # Plot 1: predicted solution
             ax1.plot(nodes_cpu, u_cpu, "b-", label="Predicted")
