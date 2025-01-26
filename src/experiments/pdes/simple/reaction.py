@@ -225,6 +225,7 @@ if __name__ == "__main__":
     args.add_argument("--method", type=str, default="adam")
     args.add_argument("--n_epochs", type=int, default=100000)
     args.add_argument("--eval_every", type=int, default=1000)
+    args.add_argument("--model", type=str, default=None)  # If None, run all models
 
     # lwup is one of [grad_norm, none].
     args.add_argument("--loss_weight_update_policy", "-lwup", type=str, default="none")
@@ -284,128 +285,130 @@ if __name__ == "__main__":
     #########################################################
     # 1. Neural network
     #########################################################
-    save_dir = os.path.join(base_save_dir, f"mlp")
-    # Logger setup
-    logger = Logger(path=os.path.join(save_dir, "logger.json"))
+    if args.model is None or args.model == "mlp":
+        save_dir = os.path.join(base_save_dir, f"mlp")
+        # Logger setup
+        logger = Logger(path=os.path.join(save_dir, "logger.json"))
 
-    # Model setup
-    model_mlp = MLP(
-        n_dim=2,
-        hidden_dim=32,
-        activation=torch.tanh,
-        device=device,
-    )
-
-    # Training setup
-    n_epochs = args.n_epochs
-    # lr = 1e-3
-    optimizer = pde.get_optimizer(model_mlp, args.method)
-
-    n_t_train = 161
-    n_x_train = 161
-    n_ic_train = 161
-    ic_weight = 10
-
-    def pde_sampler():
-        t_nodes = pde.sample_domain_1d(
-            n_samples=n_t_train,
-            dim=0,
-            basis="fourier",
-            type=args.sample_type,
+        # Model setup
+        model_mlp = MLP(
+            n_dim=2,
+            hidden_dim=32,
+            activation=torch.tanh,
+            device=device,
         )
-        x_nodes = pde.sample_domain_1d(
-            n_samples=n_x_train,
-            dim=1,
-            basis="fourier",
-            type=args.sample_type,
-        )
-        return [t_nodes, x_nodes]
 
-    def ic_sampler():
-        ic_nodes = pde.sample_domain_1d(
-            n_samples=n_ic_train,
-            dim=1,
-            basis="fourier",
-            type=args.sample_type,
-        )
-        return [torch.tensor([0.0], device=device, requires_grad=True), ic_nodes]
+        # Training setup
+        n_epochs = args.n_epochs
+        # lr = 1e-3
+        optimizer = pde.get_optimizer(model_mlp, args.method)
 
-    print(f"Training MLP with {args.method} optimizer...")
-    pde.train(
-        model_mlp,
-        n_epochs=args.n_epochs,
-        optimizer=optimizer,
-        pde_sampler=pde_sampler,
-        ic_sampler=ic_sampler,
-        ic_weight=ic_weight,
-        eval_sampler=eval_sampler,
-        eval_metrics=eval_metrics,
-        eval_every=eval_every,
-        save_dir=save_dir,
-    )
+        n_t_train = 161
+        n_x_train = 161
+        n_ic_train = 161
+        ic_weight = 10
+
+        def pde_sampler():
+            t_nodes = pde.sample_domain_1d(
+                n_samples=n_t_train,
+                dim=0,
+                basis="fourier",
+                type=args.sample_type,
+            )
+            x_nodes = pde.sample_domain_1d(
+                n_samples=n_x_train,
+                dim=1,
+                basis="fourier",
+                type=args.sample_type,
+            )
+            return [t_nodes, x_nodes]
+
+        def ic_sampler():
+            ic_nodes = pde.sample_domain_1d(
+                n_samples=n_ic_train,
+                dim=1,
+                basis="fourier",
+                type=args.sample_type,
+            )
+            return [torch.tensor([0.0], device=device, requires_grad=True), ic_nodes]
+
+        print(f"Training MLP with {args.method} optimizer...")
+        pde.train(
+            model_mlp,
+            n_epochs=args.n_epochs,
+            optimizer=optimizer,
+            pde_sampler=pde_sampler,
+            ic_sampler=ic_sampler,
+            ic_weight=ic_weight,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            eval_every=eval_every,
+            save_dir=save_dir,
+        )
 
     #########################################################
     # 2. Polynomial interpolation
     #########################################################
-    save_dir = os.path.join(base_save_dir, f"polynomial")
-    # Logger setup
-    logger = Logger(path=os.path.join(save_dir, "logger.json"))
+    if args.model is None or args.model == "polynomial":
+        save_dir = os.path.join(base_save_dir, f"polynomial")
+        # Logger setup
+        logger = Logger(path=os.path.join(save_dir, "logger.json"))
 
-    # Model setup
-    n_t = args.n_t
-    n_x = args.n_x
-    bases = ["chebyshev", "fourier"]
-    model = SpectralInterpolationND(
-        Ns=[n_t, n_x],
-        bases=bases,
-        domains=pde.domain,
-        device=device,
-    )
-
-    # Training setup
-    n_epochs = args.n_epochs
-    # lr = 1e-3
-    optimizer = pde.get_optimizer(model, args.method)
-
-    n_t_train = 161
-    n_x_train = 161
-    n_ic_train = 161
-    ic_weight = 10
-
-    def pde_sampler():
-        t_nodes = pde.sample_domain_1d(
-            n_samples=n_t_train,
-            dim=0,
-            basis=bases[0],
-            type=args.sample_type,
+        # Model setup
+        n_t = args.n_t
+        n_x = args.n_x
+        bases = ["chebyshev", "fourier"]
+        model = SpectralInterpolationND(
+            Ns=[n_t, n_x],
+            bases=bases,
+            domains=pde.domain,
+            device=device,
         )
-        x_nodes = pde.sample_domain_1d(
-            n_samples=n_x_train,
-            dim=1,
-            basis=bases[1],
-            type=args.sample_type,
-        )
-        return [t_nodes.to(device), x_nodes.to(device)]
 
-    def ic_sampler():
-        ic_nodes = pde.sample_domain_1d(
-            n_samples=n_ic_train,
-            dim=1,
-            basis=bases[1],
-            type=args.sample_type,
-        )
-        return [torch.tensor([0.0], device=device, requires_grad=True), ic_nodes]
+        # Training setup
+        n_epochs = args.n_epochs
+        # lr = 1e-3
+        optimizer = pde.get_optimizer(model, args.method)
 
-    print(f"Training Polynomial Interpolant with {args.method} optimizer...")
-    pde.train(
-        model,
-        n_epochs=args.n_epochs,
-        optimizer=optimizer,
-        pde_sampler=pde_sampler,
-        ic_sampler=ic_sampler,
-        ic_weight=ic_weight,
-        eval_sampler=eval_sampler,
-        eval_metrics=eval_metrics,
-        eval_every=eval_every,
-        save_dir=save_dir,
-    )
+        n_t_train = 161
+        n_x_train = 161
+        n_ic_train = 161
+        ic_weight = 10
+
+        def pde_sampler():
+            t_nodes = pde.sample_domain_1d(
+                n_samples=n_t_train,
+                dim=0,
+                basis=bases[0],
+                type=args.sample_type,
+            )
+            x_nodes = pde.sample_domain_1d(
+                n_samples=n_x_train,
+                dim=1,
+                basis=bases[1],
+                type=args.sample_type,
+            )
+            return [t_nodes.to(device), x_nodes.to(device)]
+
+        def ic_sampler():
+            ic_nodes = pde.sample_domain_1d(
+                n_samples=n_ic_train,
+                dim=1,
+                basis=bases[1],
+                type=args.sample_type,
+            )
+            return [torch.tensor([0.0], device=device, requires_grad=True), ic_nodes]
+
+        print(f"Training Polynomial Interpolant with {args.method} optimizer...")
+        pde.train(
+            model,
+            n_epochs=args.n_epochs,
+            optimizer=optimizer,
+            pde_sampler=pde_sampler,
+            ic_sampler=ic_sampler,
+            ic_weight=ic_weight,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            eval_every=eval_every,
+            save_dir=save_dir,
+        )

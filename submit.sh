@@ -15,16 +15,19 @@ conda activate /pscratch/sd/j/jwl50/interpolants-torch/.env
 # Advection
 # python -m src.experiments.pdes.simple.advection --c 40 --n_t 81 --n_x 80 --n_epochs 5000000 --method adam
 # python -m src.experiments.pdes.simple.advection --c 40 --n_t 81 --n_x 80 --n_epochs 100000 --method nys_newton --sample_type standard
+python -m src.experiments.pdes.simple.advection --c 40 --sample_type uniform --method adam --n_epochs 1000000 --model mlp
 
 # Reaction
 # python -m src.experiments.pdes.simple.reaction --rho 5 --n_t 41 --n_x 41 --n_epochs 5000000 --method adam
 # python -m src.experiments.pdes.simple.reaction --rho 5 --n_t 41 --n_x 41 --n_epochs 100000 --method nys_newton --sample_type standard
+# python -m src.experiments.pdes.simple.reaction --rho 5 --sample_type uniform --method adam --n_epochs 1000000 --model mlp
 
 # Wave
 # python -m src.experiments.pdes.simple.wave --c 2 --beta 5 --n_t 41 --n_x 41 --n_epochs 100000 --method adam
 # python -m src.experiments.pdes.simple.wave --c 2 --beta 5 --n_t 41 --n_x 41 --n_epochs 100000 --method nys_newton --sample_type standard
 # python -m src.experiments.pdes.simple.wave --c 2 --beta 5 --n_t 41 --n_x 41 --n_epochs 100000 --method nys_newton --sample_type standard --model polynomial
-python -m src.experiments.pdes.simple.wave --c 2 --beta 5 --n_t 41 --n_x 41 --n_epochs 5000000 --method adam --sample_type standard --model polynomial
+# python -m src.experiments.pdes.simple.wave --c 2 --beta 5 --n_t 41 --n_x 41 --n_epochs 5000000 --method adam --sample_type standard --model polynomial
+python -m src.experiments.pdes.simple.wave --c 2 --beta 5 --sample_type uniform --method adam --n_epochs 1000000 --model mlp
 
 # Burgers
 # python -m src.experiments.pdes.benchmarks.burgers --n_t 81 --n_x 81 --n_epochs 100000 --method nys_newton --sample_type standard
