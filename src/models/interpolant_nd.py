@@ -30,8 +30,6 @@ class SpectralInterpolationND(nn.Module):
         self.Ns = Ns
         self.bases = bases
         self.domains = domains
-        self.d1 = torch.tensor([domains[1][0]]).to(device)
-        self.d2 = torch.tensor([domains[1][1]]).to(device)
         self.domain_lengths = [domain[1] - domain[0] for domain in domains]
 
         # Set up nodes and weight/frequencies for interpolation (as needed)
