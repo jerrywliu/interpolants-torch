@@ -91,48 +91,48 @@ if __name__ == "__main__":
     #########################################################
     # 1. Neural network
     #########################################################
-    # save_dir = os.path.join(base_save_dir, "mlp")
-    # # Logger setup
-    # logger = Logger(path=os.path.join(save_dir, "logger.json"))
+    save_dir = os.path.join(base_save_dir, "mlp")
+    # Logger setup
+    logger = Logger(path=os.path.join(save_dir, "logger.json"))
 
-    # # Model setup
-    # model_mlp = MLP(n_dim=2, hidden_dim=32, activation=torch.tanh, device=device)
+    # Model setup
+    model_mlp = MLP(n_dim=2, hidden_dim=32, activation=torch.tanh, device=device)
 
-    # # Training setup
-    # n_epochs = args.n_epochs
-    # lr = 1e-3
-    # optimizer = target.get_optimizer(model_mlp, args.method, override_kwargs={"lr": lr})
+    # Training setup
+    n_epochs = args.n_epochs
+    optimizer = target.get_optimizer(model_mlp, args.method)
 
-    # n_t_train = 2 * c + 1
-    # n_x_train = 2 * c
+    n_t_train = 2 * c + 1
+    n_x_train = 2 * c
 
-    # def train_sampler():
-    #     t_nodes = target.sample_domain_1d(
-    #         n_samples=n_t_train,
-    #         dim=0,
-    #         basis="fourier",
-    #         type=args.sample_type,
-    #     )
-    #     x_nodes = target.sample_domain_1d(
-    #         n_samples=n_x_train,
-    #         dim=1,
-    #         basis="fourier",
-    #         type=args.sample_type,
-    #     )
-    #     return [t_nodes, x_nodes]
+    def train_sampler():
+        t_nodes = target.sample_domain_1d(
+            n_samples=n_t_train,
+            dim=0,
+            basis="fourier",
+            type=args.sample_type,
+        )
+        x_nodes = target.sample_domain_1d(
+            n_samples=n_x_train,
+            dim=1,
+            basis="fourier",
+            type=args.sample_type,
+        )
+        return [t_nodes, x_nodes]
 
-    # print(f"Training MLP...")
-    # target.train_model(
-    #     model=model_mlp,
-    #     n_epochs=n_epochs,
-    #     optimizer=optimizer,
-    #     train_sampler=train_sampler,
-    #     eval_sampler=eval_sampler,
-    #     eval_metrics=eval_metrics,
-    #     eval_every=eval_every,
-    #     save_dir=save_dir,
-    #     logger=logger,
-    # )
+    print(f"Training MLP...")
+    target.train_model(
+        model=model_mlp,
+        n_epochs=n_epochs,
+        optimizer=optimizer,
+        train_sampler=train_sampler,
+        eval_sampler=eval_sampler,
+        eval_metrics=eval_metrics,
+        eval_every=eval_every,
+        save_dir=save_dir,
+        logger=logger,
+        in_domain=target.in_domain,
+    )
 
     #########################################################
     # 2. Polynomial interpolation
@@ -187,4 +187,5 @@ if __name__ == "__main__":
         eval_every=eval_every,
         save_dir=save_dir,
         logger=logger,
+        in_domain=target.in_domain,
     )

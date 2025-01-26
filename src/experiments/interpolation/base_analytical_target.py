@@ -66,6 +66,7 @@ class BaseAnalyticalTarget(BaseFcn):
         eval_every: int = 100,
         save_dir: str = None,
         logger: Logger = None,
+        in_domain: Callable = None,
     ):
         if logger is None:
             logger = Logger(path=os.path.join(save_dir, "logger.json"))
@@ -98,8 +99,9 @@ class BaseAnalyticalTarget(BaseFcn):
                     eval_nodes = eval_sampler()
                     u_eval = model(eval_nodes)
                     u_true = self.get_function(eval_nodes)
+                    mask = in_domain(eval_nodes) if in_domain is not None else None
                     for eval_metric in eval_metrics:
-                        eval_metric_value = eval_metric(u_eval, u_true)
+                        eval_metric_value = eval_metric(u_eval, u_true, mask)
                         logger.log(
                             f"eval_{eval_metric.__name__}", eval_metric_value, epoch
                         )
@@ -147,6 +149,7 @@ class BaseAnalyticalTarget(BaseFcn):
         eval_every: int = 100,
         save_dir: str = None,
         logger: Logger = None,
+        in_domain: Callable = None,
     ):
         if logger is None:
             logger = Logger(path=os.path.join(save_dir, "logger.json"))
@@ -178,8 +181,9 @@ class BaseAnalyticalTarget(BaseFcn):
                 with torch.no_grad():
                     u_eval = model(eval_nodes)
                     u_true = self.get_function(eval_nodes)
+                    mask = in_domain(eval_nodes) if in_domain is not None else None
                     for eval_metric in eval_metrics:
-                        eval_metric_value = eval_metric(u_eval, u_true)
+                        eval_metric_value = eval_metric(u_eval, u_true, mask)
                         logger.log(
                             f"eval_{eval_metric.__name__}", eval_metric_value, epoch
                         )
@@ -210,6 +214,7 @@ class BaseAnalyticalTarget(BaseFcn):
         eval_every: int = 100,
         save_dir: str = None,
         logger: Logger = None,
+        in_domain: Callable = None,
     ):
         if logger is None:
             logger = Logger(path=os.path.join(save_dir, "logger.json"))
@@ -249,8 +254,9 @@ class BaseAnalyticalTarget(BaseFcn):
                 with torch.no_grad():
                     u_eval = model(eval_nodes)
                     u_true = self.get_function(eval_nodes)
+                    mask = in_domain(eval_nodes) if in_domain is not None else None
                     for eval_metric in eval_metrics:
-                        eval_metric_value = eval_metric(u_eval, u_true)
+                        eval_metric_value = eval_metric(u_eval, u_true, mask)
                         logger.log(
                             f"eval_{eval_metric.__name__}", eval_metric_value, epoch
                         )
@@ -281,43 +287,47 @@ class BaseAnalyticalTarget(BaseFcn):
         eval_every: int = 100,
         save_dir: str = None,
         logger: Logger = None,
+        in_domain: Callable = None,
     ):
         """Routes to appropriate training method based on optimizer type"""
         if isinstance(optimizer, NysNewtonCG):
             self.train_model_nys_newton(
-                model,
-                n_epochs,
-                optimizer,
-                train_sampler,
-                eval_sampler,
-                eval_metrics,
-                eval_every,
-                save_dir,
-                logger,
+                model=model,
+                n_epochs=n_epochs,
+                optimizer=optimizer,
+                train_sampler=train_sampler,
+                eval_sampler=eval_sampler,
+                eval_metrics=eval_metrics,
+                eval_every=eval_every,
+                save_dir=save_dir,
+                logger=logger,
+                in_domain=in_domain,
             )
         elif isinstance(optimizer, torch.optim.LBFGS):
             self.train_model_lbfgs(
-                model,
-                n_epochs,
-                optimizer,
-                train_sampler,
-                eval_sampler,
-                eval_metrics,
-                eval_every,
-                save_dir,
-                logger,
+                model=model,
+                n_epochs=n_epochs,
+                optimizer=optimizer,
+                train_sampler=train_sampler,
+                eval_sampler=eval_sampler,
+                eval_metrics=eval_metrics,
+                eval_every=eval_every,
+                save_dir=save_dir,
+                logger=logger,
+                in_domain=in_domain,
             )
         else:
             self.train_model(
-                model,
-                n_epochs,
-                optimizer,
-                train_sampler,
-                eval_sampler,
-                eval_metrics,
-                eval_every,
-                save_dir,
-                logger,
+                model=model,
+                n_epochs=n_epochs,
+                optimizer=optimizer,
+                train_sampler=train_sampler,
+                eval_sampler=eval_sampler,
+                eval_metrics=eval_metrics,
+                eval_every=eval_every,
+                save_dir=save_dir,
+                logger=logger,
+                in_domain=in_domain,
             )
 
 

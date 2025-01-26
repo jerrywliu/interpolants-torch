@@ -1,35 +1,40 @@
 import argparse
 import os
 import torch
+import torch.nn as nn
 from typing import List
 
-from src.experiments.interpolation.base_analytical_target import (
-    BaseAnalyticalTarget,
-)
+from src.experiments.interpolation.simple_fcns.sine_1d import Sine1DTarget
 from src.models.interpolant_nd import SpectralInterpolationND
 from src.models.mlp import MLP
 from src.utils.metrics import l2_error, max_error, l2_relative_error
 from src.loggers.logger import Logger
 
 
-class Sine1DTarget(BaseAnalyticalTarget):
+# This is the same as the Sine1DTarget, but we cut a hole in the domain
+# Domain = [0, 2π] minus [π/2, 3π/2]
+class SineIrregularTarget(Sine1DTarget):
     def __init__(self, device: str = "cpu"):
         super().__init__(
-            "sine_1d",
-            f=lambda x: torch.sin(x),
-            domain=[(0, 2 * torch.pi)],
-            derivative=lambda x: torch.cos(x),
-            second_derivative=lambda x: -torch.sin(x),
             device=device,
         )
 
-    def plot_solution(
-        self,
-        nodes: List[torch.Tensor],
-        u: torch.Tensor,
-        save_path: str = None,
-    ):
-        self._plot_solution_default(nodes, u, save_path)
+    def _in_domain(self, x: torch.Tensor) -> torch.Tensor:
+        # Check if outside the interval [π/2, 3π/2]
+        outside_interval = (x < torch.pi / 2) | (x > 3 * torch.pi / 2)
+        # Check if within the domain [0, 2π]
+        in_domain = (x >= 0) & (x <= 2 * torch.pi)
+        return outside_interval & in_domain  # Combine conditions
+
+    def in_domain(self, nodes: List[torch.Tensor]) -> torch.Tensor:
+        mesh = torch.meshgrid(*nodes, indexing="ij")
+        return self._in_domain(*mesh)
+
+    def get_loss(self, model: nn.Module, nodes: List[torch.Tensor]) -> torch.Tensor:
+        u_pred = model(nodes)
+        u_true = self.get_function(nodes)
+        mask = self.in_domain(nodes).float()  # Convert boolean mask to float
+        return torch.sum((u_pred - u_true) ** 2 * mask) / torch.sum(mask)
 
 
 # Compare interpolation of sin(x) using different methods:
@@ -52,10 +57,10 @@ if __name__ == "__main__":
     device = "cuda"
 
     # Problem setup
-    target = Sine1DTarget(device=device)
+    target = SineIrregularTarget(device=device)
 
     base_save_dir = (
-        f"/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/sine_1d"
+        f"/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/sine_irregular"
     )
 
     # Evaluation setup (shared for all methods)
@@ -76,7 +81,7 @@ if __name__ == "__main__":
     save_dir = os.path.join(base_save_dir, "mlp")
     n_epochs = args.n_epochs
     # lr = 1e-3
-    n_samples = 21
+    n_samples = 81
     basis_type = "fourier"
     sample_type = args.sample_type
 
@@ -101,6 +106,7 @@ if __name__ == "__main__":
         eval_every=eval_every,
         save_dir=save_dir,
         logger=logger,
+        in_domain=target.in_domain,
     )
 
     #########################################################
@@ -110,7 +116,7 @@ if __name__ == "__main__":
     n_epochs = args.n_epochs
     eval_every = 100
     # lr = 1e-3
-    n_samples = 21
+    n_samples = 81
     basis_type = "fourier"
     sample_type = args.sample_type
 
@@ -143,6 +149,7 @@ if __name__ == "__main__":
         eval_every=eval_every,
         save_dir=save_dir,
         logger=logger,
+        in_domain=target.in_domain,
     )
 
     #########################################################
@@ -152,7 +159,7 @@ if __name__ == "__main__":
     n_epochs = args.n_epochs
     eval_every = 100
     # lr = 1e-3
-    n_samples = 21
+    n_samples = 81
     basis_type = "chebyshev"
     sample_type = args.sample_type
 
@@ -185,6 +192,7 @@ if __name__ == "__main__":
         eval_every=eval_every,
         save_dir=save_dir,
         logger=logger,
+        in_domain=target.in_domain,
     )
 
     #########################################################
@@ -194,7 +202,7 @@ if __name__ == "__main__":
     n_epochs = args.n_epochs
     eval_every = 100
     # lr = 1e-3
-    n_samples = 21
+    n_samples = 81
     basis_type = "fourier"
     sample_type = args.sample_type
 
@@ -227,4 +235,5 @@ if __name__ == "__main__":
         eval_every=eval_every,
         save_dir=save_dir,
         logger=logger,
+        in_domain=target.in_domain,
     )
