@@ -196,15 +196,33 @@ class Wave(BasePDE):
             IC[i, n_x * (n_t - 1) + i] = 1  # Set t=0 value to 1 for each x
         D_t_IC = D_t[n_x * (n_t - 1) : n_x * n_t, :]
 
+        dirichlet_BC1 = torch.zeros(
+            n_t - 1, n_t * n_x, device=model.device, dtype=model.values.dtype
+        )
+        for i in range(n_t - 1):
+            dirichlet_BC1[i, n_x * (i + 1)] = (
+                1  # Set x=0 value to 1 for each t (except t=0)
+            )
+
+        dirichlet_BC2 = torch.zeros(
+            n_t - 1, n_t * n_x, device=model.device, dtype=model.values.dtype
+        )
+        for i in range(n_t - 1):
+            dirichlet_BC2[i, n_x * (i + 1) + n_x - 1] = (
+                1  # Set x=1 value to 1 for each t (except t=0)
+            )
+
         # Right hand side
         b = torch.zeros(
-            n_t * n_x + n_x + n_x, device=model.device, dtype=model.values.dtype
+            n_t * n_x + n_x + n_x + 2 * (n_t - 1),
+            device=model.device,
+            dtype=model.values.dtype,
         )
         b[n_t * n_x : n_t * n_x + n_x] = self.u_0(model.nodes[1])
         b[n_t * n_x + n_x :] = self.u_0_t(model.nodes[1])
 
         # Full system
-        A = torch.cat([L, IC, D_t_IC], dim=0)
+        A = torch.cat([L, IC, D_t_IC, dirichlet_BC1, dirichlet_BC2], dim=0)
         return A, b
 
     # TODO JL 1/22/25: add periodic boundary conditions and debug
@@ -364,6 +382,12 @@ if __name__ == "__main__":
         bases=bases,
         domains=pde.domain,
         device=device,
+    )
+    pde.fit_least_squares(model)
+    pde.plot_solution(
+        model.nodes,
+        model.values,
+        save_path=os.path.join(save_dir, "fit_least_squares.png"),
     )
 
     # Training setup
