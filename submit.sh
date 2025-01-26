@@ -23,12 +23,14 @@ conda activate /pscratch/sd/j/jwl50/interpolants-torch/.env
 # Wave
 # python -m src.experiments.pdes.simple.wave --c 2 --beta 5 --n_t 41 --n_x 41 --n_epochs 100000 --method adam
 # python -m src.experiments.pdes.simple.wave --c 2 --beta 5 --n_t 41 --n_x 41 --n_epochs 100000 --method nys_newton --sample_type standard
+# python -m src.experiments.pdes.simple.wave --c 2 --beta 5 --n_t 41 --n_x 41 --n_epochs 100000 --method nys_newton --sample_type standard --model polynomial
+python -m src.experiments.pdes.simple.wave --c 2 --beta 5 --n_t 41 --n_x 41 --n_epochs 5000000 --method adam --sample_type standard --model polynomial
 
 # Burgers
 # python -m src.experiments.pdes.benchmarks.burgers --n_t 81 --n_x 81 --n_epochs 100000 --method nys_newton --sample_type standard
 
 # Allen-Cahn
-python -m src.experiments.pdes.benchmarks.allen_cahn --n_t 81 --n_x 81 --n_epochs 100000 --method nys_newton --sample_type standard
+# python -m src.experiments.pdes.benchmarks.allen_cahn --n_t 81 --n_x 81 --n_epochs 100000 --method nys_newton --sample_type standard
 
 # NS 2D
 # TODO

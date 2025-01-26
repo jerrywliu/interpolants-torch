@@ -166,9 +166,9 @@ class SpectralInterpolationND(nn.Module):
         Returns:
             Matrix operator for the mixed derivative
         """
-        assert len(k) == self.n_dim, (
-            f"Expected {self.n_dim} derivative orders, got {len(k)}"
-        )
+        assert (
+            len(k) == self.n_dim
+        ), f"Expected {self.n_dim} derivative orders, got {len(k)}"
 
         # Get 1D matrices for each dimension
         matrices = []
@@ -211,7 +211,7 @@ class SpectralInterpolationND(nn.Module):
 
         return D
 
-    @torch.compile
+    # @torch.compile
     def _cheb_interpolate_1d(
         self,
         x_eval: torch.Tensor,
@@ -483,9 +483,9 @@ class SpectralInterpolationND(nn.Module):
         if isinstance(k, int):
             k = (k,) + (0,) * (self.n_dim - 1)
 
-        assert len(k) == self.n_dim, (
-            f"Expected {self.n_dim} derivative orders, got {len(k)}"
-        )
+        assert (
+            len(k) == self.n_dim
+        ), f"Expected {self.n_dim} derivative orders, got {len(k)}"
 
         # If all derivatives are zero, return values
         if all(ki == 0 for ki in k):
