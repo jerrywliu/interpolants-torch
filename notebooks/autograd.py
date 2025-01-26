@@ -158,9 +158,7 @@ class SpectralInterpolationND(nn.Module):
 
         return D
 
-    def _compute_fourier_derivative_matrix(
-        self, nodes: torch.Tensor, domain_length: float
-    ) -> torch.Tensor:
+    def _compute_fourier_derivative_matrix(self, nodes: torch.Tensor, domain_length: float) -> torch.Tensor:
         """
         Compute the differentiation matrix for 1D equispaced Fourier
         """

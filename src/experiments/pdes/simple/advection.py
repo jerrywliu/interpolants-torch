@@ -22,7 +22,6 @@ Solution:
 u(t, x) = u_0(x - c*t)
 """
 
-
 class Advection(BasePDE):
     def __init__(
         self,
@@ -350,16 +349,33 @@ if __name__ == "__main__":
         )
         return [torch.tensor([0.0], requires_grad=True, device=device), ic_nodes]
 
-    print(f"Training Polynomial Interpolant with {args.method} optimizer...")
-    pde.train(
-        model,
-        n_epochs=args.n_epochs,
-        optimizer=optimizer,
-        pde_sampler=pde_sampler,
-        ic_sampler=ic_sampler,
-        ic_weight=ic_weight,
-        eval_sampler=eval_sampler,
-        eval_metrics=eval_metrics,
-        eval_every=eval_every,
-        save_dir=save_dir,
-    )
+    # Handle the case for cyclical optimizers seperately 
+    if args.method == "dual":
+        print("Training Polynomial Interpolant with cycling optimizer...")
+
+        pde.train_model_dual_optimizers(
+            model, 
+            n_epochs=args.n_epochs,
+            pde_sampler=pde_sampler,
+            ic_sampler=ic_sampler,
+            ic_weight=ic_weight,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            eval_every=eval_every,
+            save_dir=save_dir,
+        )
+
+    else: 
+        print(f"Training Polynomial Interpolant with {args.method} optimizer...")
+        pde.train(
+            model,
+            n_epochs=args.n_epochs,
+            optimizer=optimizer,
+            pde_sampler=pde_sampler,
+            ic_sampler=ic_sampler,
+            ic_weight=ic_weight,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            eval_every=eval_every,
+            save_dir=save_dir,
+        )

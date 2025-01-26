@@ -290,6 +290,106 @@ class BasePDE(BaseFcn):
 
                 # Save history
                 logger.save()
+    
+    def train_model_dual_optimizers(
+        self,
+        model: nn.Module,
+        n_epochs: int,
+        pde_sampler: Callable,
+        ic_sampler: Callable,
+        ic_weight: float,
+        eval_sampler: Callable,
+        eval_metrics: List[Callable],
+        eval_every: int = 1000,
+        switch_every: int = 1000,  # Number of epochs to switch optimizers
+        save_dir: str = None,
+        logger: Logger = None,
+    ):
+    
+        if logger is None:
+            logger = Logger(path=os.path.join(save_dir, "logger.json"))
+
+        print("Training model with dual optimizers...")
+        start_time = time()
+
+        ## TODO: Make this settable from arguments 
+        optimizer1 = self.get_optimizer(model, 'adam')
+        optimizer2 = self.get_optimizer(model, 'lbfgs')
+        
+        current_optimizer = optimizer1  # Start with optimizer1
+
+        for epoch in tqdm(range(n_epochs)):
+
+            # Switch optimizer based on the epoch
+            if epoch % (2 * switch_every) < switch_every:
+                current_optimizer = optimizer1
+            else:
+                current_optimizer = optimizer2
+
+            # Sample points
+            pde_nodes = pde_sampler()
+            ic_nodes = ic_sampler()
+
+            # Update loss weights
+            self.update_loss_weights(epoch, model, current_optimizer, pde_nodes, ic_nodes)
+
+            # Train step
+            current_optimizer.zero_grad()
+
+            # Get PDE loss
+            loss, pde_loss, ic_loss = self.get_pde_loss(
+                model, pde_nodes, ic_nodes, ic_weight
+            )
+
+            # Backprop
+            loss.backward()
+
+            # Update parameters
+            current_optimizer.step()
+
+            # Log
+            logger.log("loss", loss.item(), epoch)
+            logger.log("train_pde_loss", pde_loss.item(), epoch)
+            logger.log("train_ic_loss", ic_loss.item(), epoch)
+
+            # Eval, print, and plot progress
+            if (epoch + 1) % eval_every == 0:
+                # Evaluate solution
+                with torch.no_grad():
+                    eval_nodes = eval_sampler()
+                    u_eval = model(eval_nodes)
+                    u_true = self.get_solution(eval_nodes)
+                    for eval_metric in eval_metrics:
+                        eval_metric_value = eval_metric(u_eval, u_true)
+                        logger.log(
+                            f"eval_{eval_metric.__name__}", eval_metric_value, epoch
+                        )
+
+                # Evaluate PDE loss
+                _, eval_pde_loss, _ = self.get_pde_loss(
+                    model, eval_nodes, ic_nodes, ic_weight
+                )
+                logger.log("eval_pde_loss", eval_pde_loss.item(), epoch)
+
+                current_time = time() - start_time
+                print(f"Epoch {epoch + 1} completed in {current_time:.2f} seconds")
+                print(
+                    f"PDE loss: {logger.get_most_recent_value('train_pde_loss'):1.3e}"
+                )
+                print(f"IC loss: {logger.get_most_recent_value('train_ic_loss'):1.3e}")
+                print(
+                    f"Evaluation L2 error: {logger.get_most_recent_value('eval_l2_error'):1.3e}"
+                )
+                self.plot_solution(
+                    eval_nodes,
+                    u_eval,
+                    save_path=os.path.join(
+                        save_dir, f"{self.name}_solution_{epoch}.png"
+                    ),
+                )
+
+                # Save history
+                logger.save()
 
     def train_model_nys_newton(
         self,
