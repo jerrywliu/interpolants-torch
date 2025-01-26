@@ -147,7 +147,10 @@ class Wave(BasePDE):
         ic_loss = torch.mean(ic_residual**2) + torch.mean(ic_dt_residual**2)
 
         # Periodic boundary conditions loss
-        pbc_loss = torch.mean((u_periodic_t0 - u_periodic_t1) ** 2)
+        # pbc_loss = torch.mean((u_periodic_t0 - u_periodic_t1) ** 2)
+
+        # dirichlet boundary conditions loss (keeping same var name for now)
+        pbc_loss = torch.mean(u_periodic_t0**2) + torch.mean(u_periodic_t1**2)
 
         loss_names = ["pde_loss", "ic_loss", "pbc_loss"]
         return dict(zip(loss_names, [pde_loss, ic_loss, pbc_loss]))
@@ -383,6 +386,8 @@ if __name__ == "__main__":
         domains=pde.domain,
         device=device,
     )
+
+    print("Fitting least squares solution...")
     pde.fit_least_squares(model)
     pde.plot_solution(
         model.nodes,
@@ -390,6 +395,12 @@ if __name__ == "__main__":
         save_path=os.path.join(save_dir, "fit_least_squares.png"),
     )
 
+    model = SpectralInterpolationND(
+        Ns=[n_t, n_x],
+        bases=bases,
+        domains=pde.domain,
+        device=device,
+    )
     # Training setup
     n_epochs = args.n_epochs
     # lr = 1e-3
