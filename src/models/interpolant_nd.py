@@ -211,6 +211,7 @@ class SpectralInterpolationND(nn.Module):
 
         return D
 
+    @torch.compile
     def _cheb_interpolate_1d(
         self,
         x_eval: torch.Tensor,

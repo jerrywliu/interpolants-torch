@@ -147,7 +147,10 @@ class Wave(BasePDE):
         ic_loss = torch.mean(ic_residual**2) + torch.mean(ic_dt_residual**2)
 
         # Periodic boundary conditions loss
-        pbc_loss = torch.mean((u_periodic_t0 - u_periodic_t1) ** 2)
+        # pbc_loss = torch.mean((u_periodic_t0 - u_periodic_t1) ** 2)
+
+        # dirichlet boundary conditions loss (keeping same var name for now)
+        pbc_loss = torch.mean(u_periodic_t0**2) + torch.mean(u_periodic_t1**2)
 
         loss_names = ["pde_loss", "ic_loss", "pbc_loss"]
         return dict(zip(loss_names, [pde_loss, ic_loss, pbc_loss]))
@@ -196,15 +199,33 @@ class Wave(BasePDE):
             IC[i, n_x * (n_t - 1) + i] = 1  # Set t=0 value to 1 for each x
         D_t_IC = D_t[n_x * (n_t - 1) : n_x * n_t, :]
 
+        dirichlet_BC1 = torch.zeros(
+            n_t - 1, n_t * n_x, device=model.device, dtype=model.values.dtype
+        )
+        for i in range(n_t - 1):
+            dirichlet_BC1[i, n_x * (i + 1)] = (
+                1  # Set x=0 value to 1 for each t (except t=0)
+            )
+
+        dirichlet_BC2 = torch.zeros(
+            n_t - 1, n_t * n_x, device=model.device, dtype=model.values.dtype
+        )
+        for i in range(n_t - 1):
+            dirichlet_BC2[i, n_x * (i + 1) + n_x - 1] = (
+                1  # Set x=1 value to 1 for each t (except t=0)
+            )
+
         # Right hand side
         b = torch.zeros(
-            n_t * n_x + n_x + n_x, device=model.device, dtype=model.values.dtype
+            n_t * n_x + n_x + n_x + 2 * (n_t - 1),
+            device=model.device,
+            dtype=model.values.dtype,
         )
         b[n_t * n_x : n_t * n_x + n_x] = self.u_0(model.nodes[1])
         b[n_t * n_x + n_x :] = self.u_0_t(model.nodes[1])
 
         # Full system
-        A = torch.cat([L, IC, D_t_IC], dim=0)
+        A = torch.cat([L, IC, D_t_IC, dirichlet_BC1, dirichlet_BC2], dim=0)
         return A, b
 
     # TODO JL 1/22/25: add periodic boundary conditions and debug
@@ -366,6 +387,20 @@ if __name__ == "__main__":
         device=device,
     )
 
+    print("Fitting least squares solution...")
+    pde.fit_least_squares(model)
+    pde.plot_solution(
+        model.nodes,
+        model.values,
+        save_path=os.path.join(save_dir, "fit_least_squares.png"),
+    )
+
+    model = SpectralInterpolationND(
+        Ns=[n_t, n_x],
+        bases=bases,
+        domains=pde.domain,
+        device=device,
+    )
     # Training setup
     n_epochs = args.n_epochs
     # lr = 1e-3
