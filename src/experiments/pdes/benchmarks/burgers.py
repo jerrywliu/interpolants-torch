@@ -8,6 +8,7 @@ from typing import List, Tuple, Dict
 from src.experiments.pdes.base_pde import BasePDE
 from src.models.interpolant_nd import SpectralInterpolationND
 from src.models.mlp import MLP
+from src.models.rational_2d import RationalInterpolation2D
 from src.utils.metrics import l2_error, max_error, l2_relative_error
 from src.loggers.logger import Logger
 
@@ -59,7 +60,9 @@ class Burgers(BasePDE):
         n_t, n_x = pde_nodes[0].shape[0], pde_nodes[1].shape[0]
         n_ic = ic_nodes[1].shape[0]
 
-        if isinstance(model, SpectralInterpolationND):
+        if isinstance(model, SpectralInterpolationND) or isinstance(
+            model, RationalInterpolation2D
+        ):
             # PDE
             u = model.interpolate(pde_nodes)
             u_t = model.derivative(pde_nodes, k=(1, 0))
@@ -356,6 +359,81 @@ if __name__ == "__main__":
             return [torch.tensor([0.0], device=device, requires_grad=True), ic_nodes]
 
         print(f"Training Polynomial Interpolant with {args.method} optimizer...")
+        pde.train(
+            model,
+            n_epochs=n_epochs,
+            optimizer=optimizer,
+            pde_sampler=pde_sampler,
+            ic_sampler=ic_sampler,
+            ic_weight=ic_weight,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            eval_every=eval_every,
+            save_dir=save_dir,
+            logger=logger,
+        )
+
+    #########################################################
+    # 3. Rational interpolation
+    #########################################################
+    if args.model is None or args.model == "rational":
+        save_dir = os.path.join(
+            base_save_dir,
+            f"rational/method={args.method}_nt={args.n_t}_nx={args.n_x}_sample={args.sample_type}",
+        )
+
+        # Logger setup
+        logger = Logger(path=os.path.join(save_dir, "logger.json"))
+
+        # Model setup
+        n_t = args.n_t
+        n_x = args.n_x
+        bases = ["chebyshev", "chebyshev"]
+        model = RationalInterpolation2D(
+            N_1=n_t,
+            N_2=n_x,
+            bases_1=bases[0],
+            domain_1=pde.domain[0],
+            domain_2=pde.domain[1],
+            num_poles=1,  # TODO does nothing
+            device=device,
+        )
+
+        # Training setup
+        n_epochs = args.n_epochs
+        # lr = 1e-3
+        optimizer = pde.get_optimizer(model, args.method)
+
+        n_t_train = 161
+        n_x_train = 161
+        n_ic_train = 161
+        ic_weight = 10
+
+        def pde_sampler():
+            t_nodes = pde.sample_domain_1d(
+                n_samples=n_t_train,
+                dim=0,
+                basis=bases[0],
+                type=args.sample_type,
+            )
+            x_nodes = pde.sample_domain_1d(
+                n_samples=n_x_train,
+                dim=1,
+                basis=bases[1],
+                type=args.sample_type,
+            )
+            return [t_nodes, x_nodes]
+
+        def ic_sampler():
+            ic_nodes = pde.sample_domain_1d(
+                n_samples=n_ic_train,
+                dim=1,
+                basis=bases[1],
+                type=args.sample_type,
+            )
+            return [torch.tensor([0.0], device=device, requires_grad=True), ic_nodes]
+
+        print(f"Training Rational Interpolant with {args.method} optimizer...")
         pde.train(
             model,
             n_epochs=n_epochs,

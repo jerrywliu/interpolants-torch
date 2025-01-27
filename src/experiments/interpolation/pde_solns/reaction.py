@@ -1,15 +1,20 @@
-import matplotlib.pyplot as plt
+import argparse
 import os
 import torch
+from typing import List
 
 from src.experiments.interpolation.base_analytical_target import (
     BaseAnalyticalTarget,
 )
 from src.models.interpolant_nd import SpectralInterpolationND
+from src.models.rational_2d import RationalInterpolation2D
+from src.models.mlp import MLP
+from src.utils.metrics import l2_error, max_error, l2_relative_error
+from src.loggers.logger import Logger
 
 
 class ReactionTarget(BaseAnalyticalTarget):
-    def __init__(self, rho: float = 1):
+    def __init__(self, rho: float = 1, device: str = "cpu"):
         self.u_0 = lambda x: torch.exp(
             -((x - torch.pi) ** 2) / (2 * (torch.pi / 4) ** 2)
         )
@@ -19,105 +24,226 @@ class ReactionTarget(BaseAnalyticalTarget):
             * torch.exp(self.rho * t)
             / (self.u_0(x) * torch.exp(self.rho * t) + (1 - self.u_0(x))),
             domain=[(0, 1), (0, 2 * torch.pi)],
+            device=device,
         )
         self.rho = rho
 
-    def get_exact_solution(self, t: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-        return self.f(t, x)
-
     def plot_solution(
         self,
-        u: torch.Tensor,  # (N_t, N_x)
-        t_grid: torch.Tensor,
-        x_grid: torch.Tensor,
+        nodes: List[torch.Tensor],
+        u: torch.Tensor,
         save_path: str = None,
     ):
-        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 4))
+        self._plot_solution_default(nodes, u, save_path)
 
-        # Predicted solution
-        im1 = ax1.imshow(
-            u.T,
-            extent=[0, 1, 0, 2 * torch.pi],
-            origin="lower",
-            aspect="auto",
-        )
-        plt.colorbar(im1, ax=ax1)
-        ax1.set_title("Predicted Solution")
 
-        # True solution
-        t_mesh, x_mesh = torch.meshgrid(t_grid, x_grid, indexing="ij")
-        u_true = self.get_exact_solution(t_mesh, x_mesh)
-        im2 = ax2.imshow(
-            u_true.T,
-            extent=[0, 1, 0, 2 * torch.pi],
-            origin="lower",
-            aspect="auto",
-        )
-        plt.colorbar(im2, ax=ax2)
-        ax2.set_title("True Solution")
-
-        # Error on log scale
-        error = torch.abs(u - u_true)
-        l2_rel_error = torch.norm(u - u_true, p=2) / torch.norm(u_true, p=2)
-        im3 = ax3.imshow(
-            error.T,
-            extent=[0, 1, 0, 2 * torch.pi],
-            origin="lower",
-            aspect="auto",
-            norm="log",
-        )
-        plt.colorbar(im3, ax=ax3)
-        ax3.set_title(f"Error. Max: {error.max():.3e}, L2 rel: {l2_rel_error:.3e}")
-
-        plt.tight_layout()
-
-        if save_path is not None:
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            plt.savefig(save_path)
-            plt.close()
-
+# Compare interpolation of reaction using different methods:
+# 1. Neural network
+# 2. Polynomial interpolation
+# 3. Rational interpolation
 
 if __name__ == "__main__":
 
+    args = argparse.ArgumentParser()
+    args.add_argument("--rho", type=float, default=1)
+    args.add_argument("--n_t", type=int, default=41)
+    args.add_argument("--n_x", type=int, default=41)
+    args.add_argument("--sample_type", type=str, default="uniform")
+    args.add_argument("--method", type=str, default="adam")
+    args.add_argument("--n_epochs", type=int, default=10000)
+    args.add_argument("--eval_every", type=int, default=100)
+    args.add_argument("--model", type=str, default="rational")
+    args = args.parse_args()
+
+    torch.random.manual_seed(0)
     torch.set_default_dtype(torch.float64)
+    device = "cuda"
 
-    rhos = [1, 2, 5]
+    # Problem setup
+    rho = args.rho
+    target = ReactionTarget(rho=rho, device=device)
+    base_save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/reaction/rho={rho}"
 
-    for rho in rhos:
+    # Evaluation setup (shared for all methods)
+    eval_every = args.eval_every
+    n_eval = 200
+    t_eval = torch.linspace(
+        target.domain[0][0],
+        target.domain[0][1],
+        n_eval,
+        device=device,
+        requires_grad=True,
+    )
+    x_eval = torch.linspace(
+        target.domain[1][0],
+        target.domain[1][1],
+        n_eval + 1,
+        device=device,
+        requires_grad=True,
+    )[:-1]
 
-        # Problem setup
-        target = ReactionTarget(rho=rho)
+    def eval_sampler():
+        return t_eval, x_eval
 
-        # Sanity check: ensure that the interpolation model is expressive enough to fit the target
-        save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/reaction/sanity_check"
-        for n_t in [21, 41, 81, 161, 321, 641, 1281, 2001]:
-            # n_x = n_t - 1
-            n_x = n_t
-            # bases = ["chebyshev", "fourier"]
-            bases = ["chebyshev", "chebyshev"]
-            model = SpectralInterpolationND(
-                Ns=[n_t, n_x],
-                bases=bases,
-                domains=target.domain,
+    eval_metrics = [l2_error, max_error, l2_relative_error]
+
+    #########################################################
+    # 1. Neural network
+    #########################################################
+    if args.model is None or args.model == "mlp":
+        save_dir = os.path.join(base_save_dir, "mlp")
+        # Logger setup
+        logger = Logger(path=os.path.join(save_dir, "logger.json"))
+
+        # Model setup
+        model_mlp = MLP(n_dim=2, hidden_dim=32, activation=torch.tanh, device=device)
+
+        # Training setup
+        n_epochs = args.n_epochs
+        # lr = 1e-3
+        optimizer = target.get_optimizer(model_mlp, args.method)
+
+        n_t_train = 161
+        n_x_train = 161
+
+        def train_sampler():
+            t_nodes = target.sample_domain_1d(
+                n_samples=n_t_train,
+                dim=0,
+                basis="fourier",
+                type=args.sample_type,
             )
-            # Set values
-            t_mesh, x_mesh = torch.meshgrid(
-                model.nodes[0], model.nodes[1], indexing="ij"
+            x_nodes = target.sample_domain_1d(
+                n_samples=n_x_train,
+                dim=1,
+                basis="fourier",
+                type=args.sample_type,
             )
-            data = target.get_exact_solution(t_mesh, x_mesh)
-            model.values.data = data
+            return [t_nodes, x_nodes]
 
-            # Evaluation setup
-            n_eval = 200
-            t_eval = torch.linspace(0, 1, n_eval)
-            x_eval = torch.linspace(0, 2 * torch.pi, n_eval + 1)[:-1]
+        print(f"Training MLP with {args.method} optimizer...")
+        target.train(
+            model=model_mlp,
+            n_epochs=n_epochs,
+            optimizer=optimizer,
+            train_sampler=train_sampler,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            eval_every=eval_every,
+            save_dir=save_dir,
+            logger=logger,
+        )
 
-            # Plot solution
-            target.plot_solution(
-                model.interpolate([t_eval, x_eval]).detach(),
-                t_eval,
-                x_eval,
-                save_path=os.path.join(
-                    save_dir, f"reaction_soln_rho={rho}_nt={n_t}_nx={n_x}.png"
-                ),
+    #########################################################
+    # 2. Polynomial interpolation
+    #########################################################
+    if args.model is None or args.model == "polynomial":
+        save_dir = os.path.join(base_save_dir, f"polynomial")
+        # Logger setup
+        logger = Logger(path=os.path.join(save_dir, "logger.json"))
+
+        # Model setup
+        n_t = args.n_t
+        n_x = args.n_x
+        bases = ["chebyshev", "chebyshev"]
+        model = SpectralInterpolationND(
+            Ns=[n_t, n_x],
+            bases=bases,
+            domains=target.domain,
+            device=device,
+        )
+
+        # Training setup
+        n_epochs = args.n_epochs
+        # lr = 1e-3
+        optimizer = target.get_optimizer(model, args.method)
+
+        n_t_train = 161
+        n_x_train = 161
+
+        def train_sampler():
+            t_nodes = target.sample_domain_1d(
+                n_samples=n_t_train,
+                dim=0,
+                basis="fourier",
+                type=args.sample_type,
             )
+            x_nodes = target.sample_domain_1d(
+                n_samples=n_x_train,
+                dim=1,
+                basis="fourier",
+                type=args.sample_type,
+            )
+            return [t_nodes, x_nodes]
+
+        print(f"Training Polynomial Interpolant with {args.method} optimizer...")
+        target.train(
+            model=model,
+            n_epochs=n_epochs,
+            optimizer=optimizer,
+            train_sampler=train_sampler,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            eval_every=eval_every,
+            save_dir=save_dir,
+            logger=logger,
+        )
+
+    #########################################################
+    # 3. Rational interpolation
+    #########################################################
+    if args.model is None or args.model == "rational":
+        save_dir = os.path.join(base_save_dir, f"rational")
+        # Logger setup
+        logger = Logger(path=os.path.join(save_dir, "logger.json"))
+
+        # Model setup
+        n_t = args.n_t
+        n_x = args.n_x
+        bases = ["chebyshev", "chebyshev"]
+        num_poles = 2
+        model = RationalInterpolation2D(
+            N_1=n_t,
+            N_2=n_x,
+            bases_1=bases[0],
+            domain_1=target.domain[0],
+            domain_2=target.domain[1],
+            num_poles=num_poles,
+            device=device,
+        )
+
+        # Training setup
+        n_epochs = args.n_epochs
+        # lr = 1e-3
+        optimizer = target.get_optimizer(model, args.method)
+
+        n_t_train = 161
+        n_x_train = 161
+
+        def train_sampler():
+            t_nodes = target.sample_domain_1d(
+                n_samples=n_t_train,
+                dim=0,
+                basis="chebyshev",
+                type=args.sample_type,
+            )
+            x_nodes = target.sample_domain_1d(
+                n_samples=n_x_train,
+                dim=1,
+                basis="chebyshev",
+                type=args.sample_type,
+            )
+            return [t_nodes, x_nodes]
+
+        print(f"Training Rational Interpolant with {args.method} optimizer...")
+        target.train(
+            model=model,
+            n_epochs=n_epochs,
+            optimizer=optimizer,
+            train_sampler=train_sampler,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            eval_every=eval_every,
+            save_dir=save_dir,
+            logger=logger,
+        )

@@ -358,7 +358,7 @@ if __name__ == "__main__":
         # Model setup
         n_t = args.n_t
         n_x = args.n_x
-        bases = ["chebyshev", "fourier"]
+        bases = ["chebyshev", "chebyshev"]
         model = SpectralInterpolationND(
             Ns=[n_t, n_x],
             bases=bases,
@@ -389,7 +389,7 @@ if __name__ == "__main__":
                 basis=bases[1],
                 type=args.sample_type,
             )
-            return [t_nodes.to(device), x_nodes.to(device)]
+            return [t_nodes, x_nodes]
 
         def ic_sampler():
             ic_nodes = pde.sample_domain_1d(

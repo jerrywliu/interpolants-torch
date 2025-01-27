@@ -23,6 +23,7 @@ class SpectralInterpolationND(nn.Module):
         """
         super().__init__()
         self.device = torch.device(device)
+
         # Store domain information
         assert len(Ns) == len(bases) == len(domains)
         self.n_dim = len(Ns)

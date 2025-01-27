@@ -104,14 +104,16 @@ class RationalInterpolation1D(nn.Module):
         # Standard domain is [-1, 1]
         self.to_standard = lambda x: 2 * (x - self.domain[0]) / self.domain_length - 1
         self.from_standard = lambda x: (x + 1) * self.domain_length / 2 + self.domain[0]
-        self.nodes = torch.cos(torch.pi * torch.linspace(0, 1, N, device=self.device))
-        self.nodes_standard = self.to_standard(self.nodes)
+        self.nodes_standard = torch.cos(
+            torch.pi * torch.linspace(0, 1, N, device=self.device)
+        )
+        self.nodes = self.from_standard(self.nodes_standard)
 
         # Values at nodes
         self.values = nn.Parameter(torch.zeros(N, device=self.device))
 
         # Initialize weights using standard barycentric formula
-        init_weights = compute_barycentric_weights_vect(self.nodes)
+        init_weights = compute_barycentric_weights_vect(self.nodes).to(self.device)
 
         # Make weights learnable parameters
         self.weights = nn.Parameter(init_weights)
@@ -263,7 +265,13 @@ class RationalInterpolation1D(nn.Module):
         dk_nodes = Dk @ self.values
 
         # Interpolate to evaluation points using the derivative values
-        return self._interpolate(x_eval, dk_nodes)
+        return self._interpolate(
+            x_eval,
+            dk_nodes,
+            self.nodes_standard,
+            self.to_standard,
+            self.weights,
+        )
 
 
 # This model's learnable parameters are the values at the nodes and the poles.
@@ -292,8 +300,10 @@ class RationalInterpolationPoles1D(nn.Module):
         # Standard domain is [-1, 1]
         self.to_standard = lambda x: 2 * (x - self.domain[0]) / self.domain_length - 1
         self.from_standard = lambda x: (x + 1) * self.domain_length / 2 + self.domain[0]
-        self.nodes = torch.cos(torch.pi * torch.linspace(0, 1, N, device=self.device))
-        self.nodes_standard = self.to_standard(self.nodes)
+        self.nodes_standard = torch.cos(
+            torch.pi * torch.linspace(0, 1, N, device=self.device)
+        )
+        self.nodes = self.from_standard(self.nodes_standard)
 
         # Values at nodes
         self.values = nn.Parameter(torch.zeros(N, device=self.device))
