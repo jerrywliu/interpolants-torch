@@ -11,8 +11,6 @@ from src.models.mlp import MLP
 from src.utils.metrics import l2_error, max_error, l2_relative_error
 from src.loggers.logger import Logger
 
-from src.optimizers.nys_newton_cg import NysNewtonCG
-
 """
 1D Burgers equation:
 u_t + u * u_x - nu * u_xx = 0
@@ -28,8 +26,9 @@ class Burgers(BasePDE):
         self,
         nu: float = 0.01 / torch.pi,
         device: str = "cpu",
+        **base_kwargs,
     ):
-        super().__init__("burgers", [(0, 1), (-1, 1)], device=device)
+        super().__init__("burgers", [(0, 1), (-1, 1)], device=device, **base_kwargs)
         self.nu = nu
         self.u_0 = lambda x: -torch.sin(torch.pi * x)
         self.ref_u, self.ref_t, self.ref_x = self.load_ref_solution()
@@ -153,7 +152,6 @@ class Burgers(BasePDE):
         **kwargs,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
-        # Total loss
         loss_dict = self.get_loss_dict(model, pde_nodes, ic_nodes, ic_weight)
 
         pde_weight = self.loss_weights.get("pde_loss_weight", 1.0)
