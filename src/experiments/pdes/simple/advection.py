@@ -5,8 +5,8 @@ import torch.nn as nn
 from typing import List, Callable, Tuple, Dict
 
 from src.experiments.pdes.base_pde import BasePDE
-from src.models.mlp import MLP
 from src.models.interpolant_nd import SpectralInterpolationND
+from src.models.mlp import MLP
 from src.utils.metrics import l2_error, max_error, l2_relative_error
 from src.loggers.logger import Logger
 
@@ -157,8 +157,10 @@ if __name__ == "__main__":
 
     args = argparse.ArgumentParser()
     args.add_argument("--c", type=int, default=80)
-    args.add_argument("--n_t", type=int, required=False)
-    args.add_argument("--n_x", type=int, required=False)
+    args.add_argument("--n_t", type=int, required=False) # Number of time nodes in interpolant
+    args.add_argument("--n_x", type=int, required=False) # Number of space nodes in interpolant
+    args.add_argument("--n_layers", type=int, default=3) # Number of layers in MLP
+    args.add_argument("--hidden_dim", type=int, default=256) # Number of hidden nodes in MLP
     args.add_argument("--sample_type", type=str, default="standard")
     args.add_argument("--method", type=str, default="adam")
     args.add_argument("--n_epochs", type=int, default=100000)
@@ -191,7 +193,8 @@ if __name__ == "__main__":
     )
 
     base_save_dir = (
-        f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/advection/c={c}"
+        # f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/advection/c={c}"
+        f"/scratch/interpolants/plots/pdes/advection/c={c}"
     )
 
     # Evaluation setup (shared for all methods)
@@ -248,7 +251,8 @@ if __name__ == "__main__":
         # Model setup
         model_mlp = MLP(
             n_dim=2,
-            hidden_dim=32,
+            n_layers=args.n_layers,
+            hidden_dim=args.hidden_dim,
             activation=torch.tanh,
             device=device,
         )

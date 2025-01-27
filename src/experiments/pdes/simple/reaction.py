@@ -219,8 +219,10 @@ class Reaction(BasePDE):
 if __name__ == "__main__":
     args = argparse.ArgumentParser()
     args.add_argument("--rho", type=float, default=5)
-    args.add_argument("--n_t", type=int, default=81)
-    args.add_argument("--n_x", type=int, default=81)
+    args.add_argument("--n_t", type=int, default=81) # Number of time nodes in interpolant
+    args.add_argument("--n_x", type=int, default=81) # Number of space nodes in interpolant
+    args.add_argument("--n_layers", type=int, default=3) # Number of layers in MLP
+    args.add_argument("--hidden_dim", type=int, default=256) # Number of hidden nodes in MLP
     args.add_argument("--sample_type", type=str, default="standard")
     args.add_argument("--method", type=str, default="adam")
     args.add_argument("--n_epochs", type=int, default=100000)
@@ -256,7 +258,8 @@ if __name__ == "__main__":
     )
 
     base_save_dir = (
-        f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/reaction/rho={rho}"
+        # f"/pscratch/sd/j/jwl50/interpolants-torch/plots/pdes/reaction/rho={rho}"
+        f"/scratch/interpolants/plots/pdes/reaction/rho={rho}"
     )
 
     # Evaluation setup (shared for all methods)
@@ -293,7 +296,8 @@ if __name__ == "__main__":
         # Model setup
         model_mlp = MLP(
             n_dim=2,
-            hidden_dim=32,
+            n_layers=args.n_layers,
+            hidden_dim=args.hidden_dim,
             activation=torch.tanh,
             device=device,
         )
