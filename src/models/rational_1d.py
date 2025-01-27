@@ -104,8 +104,10 @@ class RationalInterpolation1D(nn.Module):
         # Standard domain is [-1, 1]
         self.to_standard = lambda x: 2 * (x - self.domain[0]) / self.domain_length - 1
         self.from_standard = lambda x: (x + 1) * self.domain_length / 2 + self.domain[0]
-        self.nodes = torch.cos(torch.pi * torch.linspace(0, 1, N, device=self.device))
-        self.nodes_standard = self.to_standard(self.nodes)
+        self.nodes_standard = torch.cos(
+            torch.pi * torch.linspace(0, 1, N, device=self.device)
+        )
+        self.nodes = self.from_standard(self.nodes_standard)
 
         # Values at nodes
         self.values = nn.Parameter(torch.zeros(N, device=self.device))
@@ -292,8 +294,10 @@ class RationalInterpolationPoles1D(nn.Module):
         # Standard domain is [-1, 1]
         self.to_standard = lambda x: 2 * (x - self.domain[0]) / self.domain_length - 1
         self.from_standard = lambda x: (x + 1) * self.domain_length / 2 + self.domain[0]
-        self.nodes = torch.cos(torch.pi * torch.linspace(0, 1, N, device=self.device))
-        self.nodes_standard = self.to_standard(self.nodes)
+        self.nodes_standard = torch.cos(
+            torch.pi * torch.linspace(0, 1, N, device=self.device)
+        )
+        self.nodes = self.from_standard(self.nodes_standard)
 
         # Values at nodes
         self.values = nn.Parameter(torch.zeros(N, device=self.device))

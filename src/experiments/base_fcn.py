@@ -147,6 +147,8 @@ class BaseFcn:
             )
             plt.colorbar(im1, ax=ax1)
             ax1.set_title("Predicted Solution")
+            ax1.set_xlabel("t")
+            ax1.set_ylabel("x")
 
             # Plot 2: true solution
             im2 = ax2.imshow(
@@ -162,6 +164,8 @@ class BaseFcn:
             )
             plt.colorbar(im2, ax=ax2)
             ax2.set_title("True Solution")
+            ax2.set_xlabel("t")
+            ax2.set_ylabel("x")
 
             # Plot 3: error (log scale)
             im3 = ax3.imshow(
@@ -178,6 +182,8 @@ class BaseFcn:
             )
             plt.colorbar(im3, ax=ax3)
             ax3.set_title("Absolute Error")
+            ax3.set_xlabel("t")
+            ax3.set_ylabel("x")
 
         else:
             raise ValueError(
