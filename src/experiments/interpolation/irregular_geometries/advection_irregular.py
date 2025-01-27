@@ -1,33 +1,43 @@
 import argparse
 import os
 import torch
+import torch.nn as nn
 from typing import List
 
-from src.experiments.interpolation.base_analytical_target import (
-    BaseAnalyticalTarget,
-)
+from src.experiments.interpolation.pde_solns.advection import AdvectionTarget
 from src.models.interpolant_nd import SpectralInterpolationND
 from src.models.mlp import MLP
 from src.utils.metrics import l2_error, max_error, l2_relative_error
 from src.loggers.logger import Logger
 
 
-class AdvectionTarget(BaseAnalyticalTarget):
+# This is the same as the AdvectionTarget, but we cut a hole in the domain
+# Domain = [0, 1] x [0, 2*pi] minus a circle of radius 0.25 centered at (0.5, 0.5)
+class AdvectionIrregularTarget(AdvectionTarget):
     def __init__(self, c: float = 80, device: str = "cpu"):
-        super().__init__(
-            "advection",
-            f=lambda t, x: torch.sin(x - c * t),
-            domain=[(0, 1), (0, 2 * torch.pi)],
-            device=device,
-        )
+        super().__init__(c, device)
 
-    def plot_solution(
-        self,
-        nodes: List[torch.Tensor],
-        u: torch.Tensor,
-        save_path: str = None,
-    ):
-        self._plot_solution_default(nodes, u, save_path)
+    def _in_domain(self, t: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        # Check if outside the circle of radius 0.25 at (0.5, 0.5)
+        outside_circle = (x - 0.5) ** 2 + (t - 0.5) ** 2 > 0.25**2
+        # Check if within the rectangular domain [0, 1] x [0, 2π]
+        in_rectangle = (
+            (t >= self.domain[0][0])
+            & (t <= self.domain[0][1])
+            & (x >= self.domain[1][0])
+            & (x <= self.domain[1][1])
+        )
+        return outside_circle & in_rectangle  # Combine conditions
+
+    def in_domain(self, nodes: List[torch.Tensor]) -> torch.Tensor:
+        mesh = torch.meshgrid(*nodes, indexing="ij")
+        return self._in_domain(*mesh)
+
+    def get_loss(self, model: nn.Module, nodes: List[torch.Tensor]) -> torch.Tensor:
+        u_pred = model(nodes)
+        u_true = self.get_function(nodes)
+        mask = self.in_domain(nodes).float()  # Convert boolean mask to float
+        return torch.mean((u_pred - u_true) ** 2 * mask) / torch.mean(mask)
 
 
 # Compare interpolation of advection using different methods:
@@ -41,6 +51,7 @@ if __name__ == "__main__":
     args.add_argument("--n_t", type=int, default=81)
     args.add_argument("--n_x", type=int, default=81)
     args.add_argument("--sample_type", type=str, default="uniform")
+    args.add_argument("--method", type=str, default="adam")
     args.add_argument("--n_epochs", type=int, default=10000)
     args.add_argument("--eval_every", type=int, default=100)
     args = args.parse_args()
@@ -51,10 +62,8 @@ if __name__ == "__main__":
 
     # Problem setup
     c = args.c
-    target = AdvectionTarget(c=c, device=device)
-    base_save_dir = (
-        f"/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/advection/c={c}"
-    )
+    target = AdvectionIrregularTarget(c=c, device=device)
+    base_save_dir = f"/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/advection_irregular/c={c}"
 
     # Evaluation setup (shared for all methods)
     eval_every = args.eval_every
@@ -91,8 +100,7 @@ if __name__ == "__main__":
 
     # Training setup
     n_epochs = args.n_epochs
-    lr = 1e-3
-    optimizer = torch.optim.Adam(model_mlp.parameters(), lr=lr)
+    optimizer = target.get_optimizer(model_mlp, args.method)
 
     n_t_train = 2 * c + 1
     n_x_train = 2 * c
@@ -123,6 +131,7 @@ if __name__ == "__main__":
         eval_every=eval_every,
         save_dir=save_dir,
         logger=logger,
+        in_domain=target.in_domain,
     )
 
     #########################################################
@@ -146,8 +155,8 @@ if __name__ == "__main__":
 
     # Training setup
     n_epochs = args.n_epochs
-    lr = 1e-3
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    # lr = 1e-3
+    optimizer = target.get_optimizer(model, args.method)
 
     n_t_train = 2 * c + 1
     n_x_train = 2 * c
@@ -168,7 +177,7 @@ if __name__ == "__main__":
         return [t_nodes, x_nodes]
 
     print(f"Training Polynomial Interpolant...")
-    target.train_model(
+    target.train(
         model=model,
         n_epochs=n_epochs,
         optimizer=optimizer,
@@ -178,4 +187,5 @@ if __name__ == "__main__":
         eval_every=eval_every,
         save_dir=save_dir,
         logger=logger,
+        in_domain=target.in_domain,
     )

@@ -4,13 +4,6 @@ import torch.nn.functional as F
 from typing import Tuple, Callable, List, Union
 
 
-def get_cheb_nodes(n: int) -> torch.Tensor:
-    """Get Chebyshev points of the second kind"""
-    i = torch.linspace(0, 1, n)
-    return torch.cos(torch.pi * i)
-
-
-# TODO JL 1/16/25: double-check these poles are correct
 def compute_barycentric_weights(
     nodes: torch.Tensor,
     poles_real: torch.Tensor = None,
@@ -88,7 +81,12 @@ def compute_barycentric_weights_vect(
 
 # This model's learnable parameters are the values at the nodes and the barycentric weights.
 class RationalInterpolation1D(nn.Module):
-    def __init__(self, N: int, domain: Tuple[float, float], device: str = "cpu"):
+    def __init__(
+        self,
+        N: int,
+        domain: Tuple[float, float],
+        device: str = "cpu",
+    ):
         """
         Rational interpolation with Chebyshev backbone and learnable weights
 
@@ -106,8 +104,8 @@ class RationalInterpolation1D(nn.Module):
         # Standard domain is [-1, 1]
         self.to_standard = lambda x: 2 * (x - self.domain[0]) / self.domain_length - 1
         self.from_standard = lambda x: (x + 1) * self.domain_length / 2 + self.domain[0]
-        self.nodes = get_cheb_nodes(N).to(self.device)
-        self.nodes_standard = self.to_standard(self.nodes).to(self.device)
+        self.nodes = torch.cos(torch.pi * torch.linspace(0, 1, N, device=self.device))
+        self.nodes_standard = self.to_standard(self.nodes)
 
         # Values at nodes
         self.values = nn.Parameter(torch.zeros(N, device=self.device))
@@ -294,8 +292,8 @@ class RationalInterpolationPoles1D(nn.Module):
         # Standard domain is [-1, 1]
         self.to_standard = lambda x: 2 * (x - self.domain[0]) / self.domain_length - 1
         self.from_standard = lambda x: (x + 1) * self.domain_length / 2 + self.domain[0]
-        self.nodes = get_cheb_nodes(N).to(self.device)
-        self.nodes_standard = self.to_standard(self.nodes).to(self.device)
+        self.nodes = torch.cos(torch.pi * torch.linspace(0, 1, N, device=self.device))
+        self.nodes_standard = self.to_standard(self.nodes)
 
         # Values at nodes
         self.values = nn.Parameter(torch.zeros(N, device=self.device))
