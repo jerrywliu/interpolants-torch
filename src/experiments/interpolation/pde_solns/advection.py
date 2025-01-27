@@ -20,6 +20,7 @@ class AdvectionTarget(BaseAnalyticalTarget):
             domain=[(0, 1), (0, 2 * torch.pi)],
             device=device,
         )
+        self.c = c
 
     def plot_solution(
         self,
@@ -41,8 +42,10 @@ if __name__ == "__main__":
     args.add_argument("--n_t", type=int, default=81)
     args.add_argument("--n_x", type=int, default=81)
     args.add_argument("--sample_type", type=str, default="uniform")
+    args.add_argument("--method", type=str, default="adam")
     args.add_argument("--n_epochs", type=int, default=10000)
     args.add_argument("--eval_every", type=int, default=100)
+    args.add_argument("--model", type=str, default="mlp")
     args = args.parse_args()
 
     torch.random.manual_seed(0)
@@ -91,8 +94,8 @@ if __name__ == "__main__":
 
     # Training setup
     n_epochs = args.n_epochs
-    lr = 1e-3
-    optimizer = torch.optim.Adam(model_mlp.parameters(), lr=lr)
+    # lr = 1e-3
+    optimizer = target.get_optimizer(model_mlp, args.method)
 
     n_t_train = 2 * c + 1
     n_x_train = 2 * c
