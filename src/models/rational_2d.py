@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from typing import List, Tuple, Callable
 
-from src.models.rational_1d import RationalInterpolation1D, RationalInterpolationPoles1D
+from src.models.rational_1d import RationalInterpolation1D, RationalInterpolationPoles1D, compute_barycentric_weights_vect
 
 
 class RationalInterpolation2D(nn.Module):
@@ -57,11 +57,13 @@ class RationalInterpolation2D(nn.Module):
             self.nodes_standard[0] = torch.cos(torch.pi * i).to(self.device)
             # Compute barycentric weights for Chebyshev
             N = self.N_1
-            weights = torch.ones(N, device=self.device)
-            weights[0] *= 0.5
-            weights[-1] *= 0.5
-            weights[1::2] = -1
-            self.cheb_weights_1 = weights
+            # Initialize weights using standard barycentric formula
+            init_weights = compute_barycentric_weights_vect(self.nodes_standard[0]).to(self.device)
+            #weights = torch.ones(N, device=self.device)
+            #weights[0] *= 0.5
+            #weights[-1] *= 0.5
+            #weights[1::2] = -1
+            self.cheb_weights_1 = init_weights 
             self.k_1 = None
         else:
             self.nodes_standard[0] = torch.linspace(0, 2 * torch.pi, self.N_1 + 1)[

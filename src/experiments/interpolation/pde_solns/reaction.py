@@ -246,7 +246,8 @@ if __name__ == "__main__":
         # )
 
         # 3. Train rational model
-        save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/reaction/rational"
+        # save_dir = "/pscratch/sd/j/jwl50/interpolants-torch/plots/interpolation/reaction/rational"
+        save_dir = "/scratch/interpolants-torch/plots/interpolation/reaction/rational"
         n_t = 41
         n_x = 41
         bases = ["chebyshev", "rational"]
