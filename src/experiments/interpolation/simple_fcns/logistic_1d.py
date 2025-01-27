@@ -43,6 +43,7 @@ if __name__ == "__main__":
     args.add_argument("--method", type=str, default="adam")
     args.add_argument("--n_epochs", type=int, default=10000)
     args.add_argument("--eval_every", type=int, default=100)
+    args.add_argument("--model", type=str, default=None)
     args = args.parse_args()
 
     torch.random.manual_seed(0)
@@ -71,156 +72,159 @@ if __name__ == "__main__":
     #########################################################
     # 1. Neural network
     #########################################################
-    save_dir = os.path.join(base_save_dir, "mlp")
-    n_epochs = args.n_epochs
-    # lr = 1e-3
-    n_samples = 41
-    basis_type = "fourier"
-    sample_type = args.sample_type
+    if args.model is None or args.model == "mlp":
+        save_dir = os.path.join(base_save_dir, "mlp")
+        n_epochs = args.n_epochs
+        # lr = 1e-3
+        n_samples = 41
+        basis_type = "fourier"
+        sample_type = args.sample_type
 
-    def train_sampler():
-        return target.sample_domain(
-            n_samples,
-            basis=[basis_type],
-            type=[sample_type],
+        def train_sampler():
+            return target.sample_domain(
+                n_samples,
+                basis=[basis_type],
+                type=[sample_type],
+            )
+
+        model_mlp = MLP(n_dim=1, hidden_dim=32, activation=torch.tanh, device=device)
+        optimizer = target.get_optimizer(model_mlp, args.method)
+        logger = Logger(path=os.path.join(save_dir, "logger.json"))
+
+        target.train(
+            model=model_mlp,
+            n_epochs=n_epochs,
+            optimizer=optimizer,
+            train_sampler=train_sampler,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            eval_every=eval_every,
+            save_dir=save_dir,
+            logger=logger,
         )
-
-    model_mlp = MLP(n_dim=1, hidden_dim=32, activation=torch.tanh, device=device)
-    optimizer = target.get_optimizer(model_mlp, args.method)
-    logger = Logger(path=os.path.join(save_dir, "logger.json"))
-
-    target.train(
-        model=model_mlp,
-        n_epochs=n_epochs,
-        optimizer=optimizer,
-        train_sampler=train_sampler,
-        eval_sampler=eval_sampler,
-        eval_metrics=eval_metrics,
-        eval_every=eval_every,
-        save_dir=save_dir,
-        logger=logger,
-    )
 
     #########################################################
     # 2. Polynomial interpolation
     #########################################################
-    save_dir = os.path.join(base_save_dir, "chebyshev")
-    n_epochs = args.n_epochs
-    # lr = 1e-3
-    n_samples = 41
-    basis_type = "chebyshev"
-    sample_type = args.sample_type
+    if args.model is None or args.model == "chebyshev":
+        save_dir = os.path.join(base_save_dir, "chebyshev")
+        n_epochs = args.n_epochs
+        # lr = 1e-3
+        n_samples = 41
+        basis_type = "chebyshev"
+        sample_type = args.sample_type
 
-    def train_sampler():
-        return target.sample_domain(
-            n_samples,
-            basis=[basis_type],
-            type=[sample_type],
+        def train_sampler():
+            return target.sample_domain(
+                n_samples,
+                basis=[basis_type],
+                type=[sample_type],
+            )
+
+        eval_metrics = [l2_error, max_error, l2_relative_error]
+
+        n_x = 41
+        bases = ["chebyshev"]
+        domains = target.domain
+        model_cheb_uniform = SpectralInterpolationND(
+            Ns=[n_x],
+            bases=bases,
+            domains=domains,
+            device=device,
         )
+        optimizer = target.get_optimizer(model_cheb_uniform, args.method)
+        logger = Logger(path=os.path.join(save_dir, "logger.json"))
 
-    eval_metrics = [l2_error, max_error, l2_relative_error]
-
-    n_x = 41
-    bases = ["chebyshev"]
-    domains = target.domain
-    model_cheb_uniform = SpectralInterpolationND(
-        Ns=[n_x],
-        bases=bases,
-        domains=domains,
-        device=device,
-    )
-    optimizer = target.get_optimizer(model_cheb_uniform, args.method)
-    logger = Logger(path=os.path.join(save_dir, "logger.json"))
-
-    target.train(
-        model=model_cheb_uniform,
-        n_epochs=n_epochs,
-        optimizer=optimizer,
-        train_sampler=train_sampler,
-        eval_sampler=eval_sampler,
-        eval_metrics=eval_metrics,
-        eval_every=eval_every,
-        save_dir=save_dir,
-        logger=logger,
-    )
+        target.train(
+            model=model_cheb_uniform,
+            n_epochs=n_epochs,
+            optimizer=optimizer,
+            train_sampler=train_sampler,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            eval_every=eval_every,
+            save_dir=save_dir,
+            logger=logger,
+        )
 
     #########################################################
     # 3. Barycentric rational interpolation
     #########################################################
-    save_dir = os.path.join(base_save_dir, "rational")
-    n_epochs = args.n_epochs
-    # lr = 1e-3
-    n_samples = 41
-    basis_type = "chebyshev"
-    sample_type = args.sample_type
+    if args.model is None or args.model == "rational":
+        save_dir = os.path.join(base_save_dir, "rational")
+        n_epochs = args.n_epochs
+        # lr = 1e-3
+        n_samples = 41
+        basis_type = "chebyshev"
+        sample_type = args.sample_type
 
-    def train_sampler():
-        return target.sample_domain(
-            n_samples,
-            basis=[basis_type],
-            type=[sample_type],
+        def train_sampler():
+            return target.sample_domain(
+                n_samples,
+                basis=[basis_type],
+                type=[sample_type],
+            )
+
+        eval_metrics = [l2_error, max_error, l2_relative_error]
+
+        n_x = 21
+        model_rational = RationalInterpolation1D(
+            N=n_x,
+            domain=target.domain[0],
+            device=device,
+        )
+        optimizer = target.get_optimizer(model_rational, args.method)
+        logger = Logger(path=os.path.join(save_dir, "logger.json"))
+
+        target.train(
+            model=model_rational,
+            n_epochs=n_epochs,
+            optimizer=optimizer,
+            train_sampler=train_sampler,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            eval_every=eval_every,
+            save_dir=save_dir,
+            logger=logger,
         )
 
-    eval_metrics = [l2_error, max_error, l2_relative_error]
+        #########################################################
+        # 4. Barycentric rational interpolation with learnable poles
+        #########################################################
+        save_dir = os.path.join(base_save_dir, "rational_poles")
+        n_epochs = args.n_epochs
+        # lr = 1e-3
+        n_samples = 41
+        basis_type = "chebyshev"
+        sample_type = args.sample_type
 
-    n_x = 21
-    model_rational = RationalInterpolation1D(
-        N=n_x,
-        domain=target.domain[0],
-        device=device,
-    )
-    optimizer = target.get_optimizer(model_rational, args.method)
-    logger = Logger(path=os.path.join(save_dir, "logger.json"))
+        def train_sampler():
+            return target.sample_domain(
+                n_samples,
+                basis=[basis_type],
+                type=[sample_type],
+            )
 
-    target.train(
-        model=model_rational,
-        n_epochs=n_epochs,
-        optimizer=optimizer,
-        train_sampler=train_sampler,
-        eval_sampler=eval_sampler,
-        eval_metrics=eval_metrics,
-        eval_every=eval_every,
-        save_dir=save_dir,
-        logger=logger,
-    )
+        eval_metrics = [l2_error, max_error, l2_relative_error]
 
-    #########################################################
-    # 4. Barycentric rational interpolation with learnable poles
-    #########################################################
-    save_dir = os.path.join(base_save_dir, "rational_poles")
-    n_epochs = args.n_epochs
-    # lr = 1e-3
-    n_samples = 41
-    basis_type = "chebyshev"
-    sample_type = args.sample_type
-
-    def train_sampler():
-        return target.sample_domain(
-            n_samples,
-            basis=[basis_type],
-            type=[sample_type],
+        n_x = 21
+        model_rational_poles = RationalInterpolationPoles1D(
+            N=n_x,
+            domain=target.domain[0],
+            num_poles=2,
+            device=device,
         )
+        optimizer = target.get_optimizer(model_rational_poles, args.method)
+        logger = Logger(path=os.path.join(save_dir, "logger.json"))
 
-    eval_metrics = [l2_error, max_error, l2_relative_error]
-
-    n_x = 21
-    model_rational_poles = RationalInterpolationPoles1D(
-        N=n_x,
-        domain=target.domain[0],
-        num_poles=2,
-        device=device,
-    )
-    optimizer = target.get_optimizer(model_rational_poles, args.method)
-    logger = Logger(path=os.path.join(save_dir, "logger.json"))
-
-    target.train(
-        model=model_rational_poles,
-        n_epochs=n_epochs,
-        optimizer=optimizer,
-        train_sampler=train_sampler,
-        eval_sampler=eval_sampler,
-        eval_metrics=eval_metrics,
-        eval_every=eval_every,
-        save_dir=save_dir,
-        logger=logger,
-    )
+        target.train(
+            model=model_rational_poles,
+            n_epochs=n_epochs,
+            optimizer=optimizer,
+            train_sampler=train_sampler,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            eval_every=eval_every,
+            save_dir=save_dir,
+            logger=logger,
+        )
