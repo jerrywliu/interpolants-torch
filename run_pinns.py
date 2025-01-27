@@ -4,18 +4,28 @@ import argparse
 import os
 import sys
 
+args = argparse.ArgumentParser()
+args.add_argument("--method", type=str, default="adam")
+args.add_argument("--sample_type", type=str, default="uniform")
+args.add_argument("--n_epochs", type=int, default=1000000)
+args.add_argument("--cuda_device", type=int, default=0)
+args.add_argument("--eval_every", type=int, default=1000)
+args.add_argument("--n_layers", type=int, default=3)
+args.add_argument("--hidden_dim", type=int, default=256)
+args = args.parse_args()
+
 # Training setup
-method = "adam"
-sample_type = "uniform"
-n_epochs = 1000000
-cuda_device = 0
+method = args.method
+sample_type = args.sample_type
+n_epochs = args.n_epochs
+cuda_device = args.cuda_device
 
 # Evaluation setup
-eval_every = 1000
+eval_every = args.eval_every
 
 # MLP
-n_layers = 3
-hidden_dim = 256
+n_layers = args.n_layers
+hidden_dim = args.hidden_dim
 
 # Experiments
 experiment_list = [
