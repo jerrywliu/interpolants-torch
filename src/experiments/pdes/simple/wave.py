@@ -47,6 +47,12 @@ class Wave(BasePDE):
         t_mesh, x_mesh = torch.meshgrid(nodes[0], nodes[1], indexing="ij")
         return self.exact_solution(t_mesh, x_mesh)
 
+    def init_at_noisy_solution(self, model: SpectralInterpolationND, eps: float = 1e-3):
+        solution = self.get_solution(model.nodes)
+        solution += eps * torch.randn_like(solution)
+        model.values.data = solution
+        return model
+
     def get_loss_dict(
         self,
         model: nn.Module,
@@ -334,7 +340,7 @@ if __name__ == "__main__":
     # 2. Neural network
     #########################################################
     if args.model is None or args.model == "mlp":
-        save_dir = os.path.join(base_save_dir, f"mlp")
+        save_dir = os.path.join(base_save_dir, f"mlp/method={args.method}")
         # Logger setup
         logger = Logger(path=os.path.join(save_dir, "logger.json"))
 
@@ -409,27 +415,108 @@ if __name__ == "__main__":
         n_t = args.n_t
         n_x = args.n_x
         bases = ["chebyshev", "chebyshev"]
-        model = SpectralInterpolationND(
+        model_ls = SpectralInterpolationND(
             Ns=[n_t, n_x],
             bases=bases,
             domains=pde.domain,
             device=device,
         )
 
+        # Sanity check: fit least squares solution
         print("Fitting least squares solution...")
-        pde.fit_least_squares(model)
+        pde.fit_least_squares(model_ls)
         pde.plot_solution(
-            model.nodes,
-            model.values,
+            model_ls.nodes,
+            model_ls.values,
             save_path=os.path.join(save_dir, "fit_least_squares.png"),
         )
 
+        # Model setup
         model = SpectralInterpolationND(
             Ns=[n_t, n_x],
             bases=bases,
             domains=pde.domain,
             device=device,
         )
+        # Training setup
+        n_epochs = args.n_epochs
+        # lr = 1e-3
+        optimizer = pde.get_optimizer(model, args.method)
+
+        n_t_train = 161
+        n_x_train = 161
+        n_ic_train = 161
+        ic_weight = 10
+
+        def pde_sampler():
+            t_nodes = pde.sample_domain_1d(
+                n_samples=n_t_train,
+                dim=0,
+                basis=bases[0],
+                type=args.sample_type,
+            )
+            x_nodes = pde.sample_domain_1d(
+                n_samples=n_x_train,
+                dim=1,
+                basis=bases[1],
+                type=args.sample_type,
+            )
+            return [t_nodes, x_nodes]
+
+        def ic_sampler():
+            ic_nodes = pde.sample_domain_1d(
+                n_samples=n_ic_train,
+                dim=1,
+                basis=bases[1],
+                type=args.sample_type,
+            )
+            return [torch.tensor([0.0], device=device, requires_grad=True), ic_nodes]
+
+        print(f"Training Polynomial Interpolant with {args.method} optimizer...")
+        pde.train(
+            model,
+            n_epochs=args.n_epochs,
+            optimizer=optimizer,
+            pde_sampler=pde_sampler,
+            ic_sampler=ic_sampler,
+            ic_weight=ic_weight,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            eval_every=eval_every,
+            save_dir=save_dir,
+        )
+
+    #########################################################
+    # 4. Polynomial interpolation, but initialized at noisy solution
+    #########################################################
+    if args.model is None or args.model == "polynomial_noisy":
+        save_dir = os.path.join(
+            base_save_dir,
+            f"polynomial_noisy/method={args.method}_nt={args.n_t}_nx={args.n_x}_sample={args.sample_type}",
+        )
+        # Logger setup
+        logger = Logger(path=os.path.join(save_dir, "logger.json"))
+
+        # Noise level
+        eps = 1e-3
+
+        # Model setup
+        n_t = args.n_t
+        n_x = args.n_x
+        bases = ["chebyshev", "chebyshev"]
+        model = SpectralInterpolationND(
+            Ns=[n_t, n_x],
+            bases=bases,
+            domains=pde.domain,
+            device=device,
+        )
+        model = pde.init_at_noisy_solution(model, eps=eps)
+        pde.plot_solution(
+            model.nodes,
+            model.values,
+            save_path=os.path.join(save_dir, "init_noisy_solution.png"),
+        )
+
         # Training setup
         n_epochs = args.n_epochs
         # lr = 1e-3
