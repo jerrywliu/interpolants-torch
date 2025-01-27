@@ -344,6 +344,7 @@ if __name__ == "__main__":
             eval_metrics=eval_metrics,
             eval_every=eval_every,
             save_dir=save_dir,
+            logger=logger,
         )
 
     #########################################################
@@ -411,4 +412,5 @@ if __name__ == "__main__":
             eval_metrics=eval_metrics,
             eval_every=eval_every,
             save_dir=save_dir,
+            logger=logger,
         )

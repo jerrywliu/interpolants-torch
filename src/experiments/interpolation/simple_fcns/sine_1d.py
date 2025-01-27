@@ -45,6 +45,7 @@ if __name__ == "__main__":
     args.add_argument("--method", type=str, default="adam")
     args.add_argument("--n_epochs", type=int, default=20000)
     args.add_argument("--eval_every", type=int, default=100)
+    args.add_argument("--model", type=str, default=None)
     args = args.parse_args()
 
     torch.random.manual_seed(0)
@@ -73,158 +74,162 @@ if __name__ == "__main__":
     #########################################################
     # 1. Neural network
     #########################################################
-    save_dir = os.path.join(base_save_dir, "mlp")
-    n_epochs = args.n_epochs
-    # lr = 1e-3
-    n_samples = 21
-    basis_type = "fourier"
-    sample_type = args.sample_type
+    if args.model is None or args.model == "mlp":
+        save_dir = os.path.join(base_save_dir, "mlp")
+        n_epochs = args.n_epochs
+        # lr = 1e-3
+        n_samples = 21
+        basis_type = "fourier"
+        sample_type = args.sample_type
 
-    def train_sampler():
-        return target.sample_domain(
-            n_samples,
-            basis=[basis_type],
-            type=[sample_type],
+        def train_sampler():
+            return target.sample_domain(
+                n_samples,
+                basis=[basis_type],
+                type=[sample_type],
+            )
+
+        model_mlp = MLP(n_dim=1, hidden_dim=32, activation=torch.tanh, device=device)
+        optimizer = target.get_optimizer(model_mlp, args.method)
+        logger = Logger(path=os.path.join(save_dir, "logger.json"))
+
+        target.train(
+            model=model_mlp,
+            n_epochs=n_epochs,
+            optimizer=optimizer,
+            train_sampler=train_sampler,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            eval_every=eval_every,
+            save_dir=save_dir,
+            logger=logger,
         )
-
-    model_mlp = MLP(n_dim=1, hidden_dim=32, activation=torch.tanh, device=device)
-    optimizer = target.get_optimizer(model_mlp, args.method)
-    logger = Logger(path=os.path.join(save_dir, "logger.json"))
-
-    target.train(
-        model=model_mlp,
-        n_epochs=n_epochs,
-        optimizer=optimizer,
-        train_sampler=train_sampler,
-        eval_sampler=eval_sampler,
-        eval_metrics=eval_metrics,
-        eval_every=eval_every,
-        save_dir=save_dir,
-        logger=logger,
-    )
 
     #########################################################
     # 2a. Polynomial interpolation (Chebyshev, training points are uniformly distributed)
     #########################################################
-    save_dir = os.path.join(base_save_dir, "chebyshev_uniform")
-    n_epochs = args.n_epochs
-    eval_every = 100
-    # lr = 1e-3
-    n_samples = 21
-    basis_type = "fourier"
-    sample_type = args.sample_type
+    if args.model is None or args.model == "chebyshev_uniform":
+        save_dir = os.path.join(base_save_dir, "chebyshev_uniform")
+        n_epochs = args.n_epochs
+        eval_every = 100
+        # lr = 1e-3
+        n_samples = 21
+        basis_type = "fourier"
+        sample_type = args.sample_type
 
-    def train_sampler():
-        return target.sample_domain(
-            n_samples,
-            basis=[basis_type],
-            type=[sample_type],
+        def train_sampler():
+            return target.sample_domain(
+                n_samples,
+                basis=[basis_type],
+                type=[sample_type],
+            )
+
+        n_x = 21
+        bases = ["chebyshev"]
+        domains = target.domain
+        model_cheb_uniform = SpectralInterpolationND(
+            Ns=[n_x],
+            bases=bases,
+            domains=domains,
+            device=device,
         )
+        optimizer = target.get_optimizer(model_cheb_uniform, args.method)
+        logger = Logger(path=os.path.join(save_dir, "logger.json"))
 
-    n_x = 21
-    bases = ["chebyshev"]
-    domains = target.domain
-    model_cheb_uniform = SpectralInterpolationND(
-        Ns=[n_x],
-        bases=bases,
-        domains=domains,
-        device=device,
-    )
-    optimizer = target.get_optimizer(model_cheb_uniform, args.method)
-    logger = Logger(path=os.path.join(save_dir, "logger.json"))
-
-    target.train(
-        model=model_cheb_uniform,
-        n_epochs=n_epochs,
-        optimizer=optimizer,
-        train_sampler=train_sampler,
-        eval_sampler=eval_sampler,
-        eval_metrics=eval_metrics,
-        eval_every=eval_every,
-        save_dir=save_dir,
-        logger=logger,
-    )
+        target.train(
+            model=model_cheb_uniform,
+            n_epochs=n_epochs,
+            optimizer=optimizer,
+            train_sampler=train_sampler,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            eval_every=eval_every,
+            save_dir=save_dir,
+            logger=logger,
+        )
 
     #########################################################
     # 2b. Polynomial interpolation (Chebyshev, training points are Chebyshev distributed)
     #########################################################
-    save_dir = os.path.join(base_save_dir, "chebyshev_chebyshev")
-    n_epochs = args.n_epochs
-    eval_every = 100
-    # lr = 1e-3
-    n_samples = 21
-    basis_type = "chebyshev"
-    sample_type = args.sample_type
+    if args.model is None or args.model == "chebyshev_chebyshev":
+        save_dir = os.path.join(base_save_dir, "chebyshev_chebyshev")
+        n_epochs = args.n_epochs
+        eval_every = 100
+        # lr = 1e-3
+        n_samples = 21
+        basis_type = "chebyshev"
+        sample_type = args.sample_type
 
-    def train_sampler():
-        return target.sample_domain(
-            n_samples,
-            basis=[basis_type],
-            type=[sample_type],
+        def train_sampler():
+            return target.sample_domain(
+                n_samples,
+                basis=[basis_type],
+                type=[sample_type],
+            )
+
+        n_x = 21
+        bases = ["chebyshev"]
+        domains = target.domain
+        model_cheb_chebyshev = SpectralInterpolationND(
+            Ns=[n_x],
+            bases=bases,
+            domains=domains,
+            device=device,
         )
+        optimizer = target.get_optimizer(model_cheb_chebyshev, args.method)
+        logger = Logger(path=os.path.join(save_dir, "logger.json"))
 
-    n_x = 21
-    bases = ["chebyshev"]
-    domains = target.domain
-    model_cheb_chebyshev = SpectralInterpolationND(
-        Ns=[n_x],
-        bases=bases,
-        domains=domains,
-        device=device,
-    )
-    optimizer = target.get_optimizer(model_cheb_chebyshev, args.method)
-    logger = Logger(path=os.path.join(save_dir, "logger.json"))
-
-    target.train(
-        model=model_cheb_chebyshev,
-        n_epochs=n_epochs,
-        optimizer=optimizer,
-        train_sampler=train_sampler,
-        eval_sampler=eval_sampler,
-        eval_metrics=eval_metrics,
-        eval_every=eval_every,
-        save_dir=save_dir,
-        logger=logger,
-    )
+        target.train(
+            model=model_cheb_chebyshev,
+            n_epochs=n_epochs,
+            optimizer=optimizer,
+            train_sampler=train_sampler,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            eval_every=eval_every,
+            save_dir=save_dir,
+            logger=logger,
+        )
 
     #########################################################
     # 3. Polynomial interpolation (Fourier)
     #########################################################
-    save_dir = os.path.join(base_save_dir, "fourier")
-    n_epochs = args.n_epochs
-    eval_every = 100
-    # lr = 1e-3
-    n_samples = 21
-    basis_type = "fourier"
-    sample_type = args.sample_type
+    if args.model is None or args.model == "fourier":
+        save_dir = os.path.join(base_save_dir, "fourier")
+        n_epochs = args.n_epochs
+        eval_every = 100
+        # lr = 1e-3
+        n_samples = 21
+        basis_type = "fourier"
+        sample_type = args.sample_type
 
-    def train_sampler():
-        return target.sample_domain(
-            n_samples,
-            basis=[basis_type],
-            type=[sample_type],
+        def train_sampler():
+            return target.sample_domain(
+                n_samples,
+                basis=[basis_type],
+                type=[sample_type],
+            )
+
+        n_x = 20
+        bases = ["fourier"]
+        domains = target.domain
+        model_fourier = SpectralInterpolationND(
+            Ns=[n_x],
+            bases=bases,
+            domains=domains,
+            device=device,
         )
+        optimizer = target.get_optimizer(model_fourier, args.method)
+        logger = Logger(path=os.path.join(save_dir, "logger.json"))
 
-    n_x = 20
-    bases = ["fourier"]
-    domains = target.domain
-    model_fourier = SpectralInterpolationND(
-        Ns=[n_x],
-        bases=bases,
-        domains=domains,
-        device=device,
-    )
-    optimizer = target.get_optimizer(model_fourier, args.method)
-    logger = Logger(path=os.path.join(save_dir, "logger.json"))
-
-    target.train(
-        model=model_fourier,
-        n_epochs=n_epochs,
-        optimizer=optimizer,
-        train_sampler=train_sampler,
-        eval_sampler=eval_sampler,
-        eval_metrics=eval_metrics,
-        eval_every=eval_every,
-        save_dir=save_dir,
-        logger=logger,
-    )
+        target.train(
+            model=model_fourier,
+            n_epochs=n_epochs,
+            optimizer=optimizer,
+            train_sampler=train_sampler,
+            eval_sampler=eval_sampler,
+            eval_metrics=eval_metrics,
+            eval_every=eval_every,
+            save_dir=save_dir,
+            logger=logger,
+        )

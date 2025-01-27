@@ -2,7 +2,7 @@ import argparse
 import os
 import torch
 import torch.nn as nn
-from typing import List, Callable, Tuple, Dict
+from typing import List, Tuple, Dict
 
 from src.experiments.pdes.base_pde import BasePDE
 from src.models.interpolant_nd import SpectralInterpolationND
@@ -61,8 +61,6 @@ class Wave(BasePDE):
         ic_weight: float = 1,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
-        if ic_nodes is None:
-            ic_nodes = [torch.tensor([0.0]), pde_nodes[-1]]
 
         n_t, n_x = pde_nodes[0].shape[0], pde_nodes[1].shape[0]
         n_ic = ic_nodes[1].shape[0]
@@ -152,10 +150,7 @@ class Wave(BasePDE):
         ic_dt_residual = u_t_ic - self.u_0_t(ic_nodes[1])
         ic_loss = torch.mean(ic_residual**2) + torch.mean(ic_dt_residual**2)
 
-        # Periodic boundary conditions loss
-        # pbc_loss = torch.mean((u_periodic_t0 - u_periodic_t1) ** 2)
-
-        # dirichlet boundary conditions loss (keeping same var name for now)
+        # Dirichlet boundary conditions loss
         pbc_loss = torch.mean(u_periodic_t0**2) + torch.mean(u_periodic_t1**2)
 
         loss_names = ["pde_loss", "ic_loss", "pbc_loss"]
@@ -169,6 +164,7 @@ class Wave(BasePDE):
         ic_weight: float = 1,
         **kwargs,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
         # Total loss
         loss_dict = self.get_loss_dict(model, pde_nodes, ic_nodes, ic_weight)
 
@@ -189,7 +185,6 @@ class Wave(BasePDE):
         )
 
     # Get the least squares problem equivalent to a spectral solve
-    # TODO JL 1/22/25: add periodic boundary conditions and debug
     def get_least_squares(self, model: SpectralInterpolationND):
         n_t, n_x = model.nodes[0].shape[0], model.nodes[1].shape[0]
 
@@ -234,7 +229,6 @@ class Wave(BasePDE):
         A = torch.cat([L, IC, D_t_IC, dirichlet_BC1, dirichlet_BC2], dim=0)
         return A, b
 
-    # TODO JL 1/22/25: add periodic boundary conditions and debug
     def fit_least_squares(self, model: SpectralInterpolationND):
         A, b = self.get_least_squares(model)
         u = torch.linalg.lstsq(A, b).solution
@@ -398,6 +392,7 @@ if __name__ == "__main__":
             eval_metrics=eval_metrics,
             eval_every=eval_every,
             save_dir=save_dir,
+            logger=logger,
         )
 
     #########################################################
@@ -484,21 +479,24 @@ if __name__ == "__main__":
             eval_metrics=eval_metrics,
             eval_every=eval_every,
             save_dir=save_dir,
+            logger=logger,
         )
 
     #########################################################
     # 4. Polynomial interpolation, but initialized at noisy solution
     #########################################################
     if args.model is None or args.model == "polynomial_noisy":
+
+        # Noise level
+        eps = 1e-1
+
+        # Save directory
         save_dir = os.path.join(
             base_save_dir,
-            f"polynomial_noisy/method={args.method}_nt={args.n_t}_nx={args.n_x}_sample={args.sample_type}",
+            f"polynomial_noisy/method={args.method}_nt={args.n_t}_nx={args.n_x}_sample={args.sample_type}_eps={eps}",
         )
         # Logger setup
         logger = Logger(path=os.path.join(save_dir, "logger.json"))
-
-        # Noise level
-        eps = 1e-3
 
         # Model setup
         n_t = args.n_t
@@ -563,4 +561,5 @@ if __name__ == "__main__":
             eval_metrics=eval_metrics,
             eval_every=eval_every,
             save_dir=save_dir,
+            logger=logger,
         )
