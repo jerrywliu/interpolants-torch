@@ -265,7 +265,13 @@ class RationalInterpolation1D(nn.Module):
         dk_nodes = Dk @ self.values
 
         # Interpolate to evaluation points using the derivative values
-        return self._interpolate(x_eval, dk_nodes)
+        return self._interpolate(
+            x_eval,
+            dk_nodes,
+            self.nodes_standard,
+            self.to_standard,
+            self.weights,
+        )
 
 
 # This model's learnable parameters are the values at the nodes and the poles.

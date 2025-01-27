@@ -32,6 +32,7 @@ conda activate /pscratch/sd/j/jwl50/interpolants-torch/.env
 # Burgers
 # python -m src.experiments.pdes.benchmarks.burgers --n_t 81 --n_x 81 --n_epochs 100000 --method nys_newton --sample_type standard
 python -m src.experiments.pdes.benchmarks.burgers --n_t 81 --n_x 81 --n_epochs 100000 --eval_every 100 --method nys_newton --sample_type standard --model polynomial
+python -m src.experiments.pdes.benchmarks.burgers --n_t 81 --n_x 81 --n_epochs 100000 --eval_every 100 --method nys_newton --sample_type standard --model rational
 
 # Allen-Cahn
 # python -m src.experiments.pdes.benchmarks.allen_cahn --n_t 81 --n_x 81 --n_epochs 100000 --method nys_newton --sample_type standard
