@@ -164,6 +164,9 @@ class BasePDE(BaseFcn):
             # Eval, print, and plot progress
             if (epoch + 1) % eval_every == 0:
 
+                # Save checkpoint
+                torch.save(model.state_dict(), os.path.join(save_dir, f"checkpoint_{epoch}.pth"))
+
                 # Evaluate solution
                 with torch.no_grad():
                     eval_nodes = eval_sampler()
@@ -249,6 +252,9 @@ class BasePDE(BaseFcn):
 
             # Eval, print, and plot progress
             if (epoch + 1) % eval_every == 0:
+
+                # Save checkpoint
+                torch.save(model.state_dict(), os.path.join(save_dir, f"checkpoint_{epoch}.pth"))
 
                 # Evaluate solution
                 with torch.no_grad():
@@ -348,6 +354,9 @@ class BasePDE(BaseFcn):
             # Eval, print, and plot progress
             if (epoch + 1) % eval_every == 0:
 
+                # Save checkpoint
+                torch.save(model.state_dict(), os.path.join(save_dir, f"checkpoint_{epoch}.pth"))
+
                 # Evaluate solution
                 with torch.no_grad():
                     u_eval = model(eval_nodes)
@@ -388,6 +397,21 @@ class BasePDE(BaseFcn):
 
                 # Save history
                 logger.save()
+
+    def train_model_alternating(
+        self,
+        model: nn.Module,
+        n_epochs: int,
+        pde_sampler: Callable,
+        ic_sampler: Callable,
+        ic_weight: float,
+        eval_sampler: Callable,
+        eval_metrics: List[Callable],
+        eval_every: int = 100,
+        save_dir: str = None,
+        logger: Logger = None,
+    ):
+        pass
 
     def train(
         self,
